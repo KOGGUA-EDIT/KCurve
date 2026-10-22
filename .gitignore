@@ -1,0 +1,6 @@
+.ec-config-*/
+.tmp/
+dist/
+*.log
+Thumbs.db
+.DS_Store
