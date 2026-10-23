@@ -1,4 +1,4 @@
-# KCurve 1.0.0 安装
+# KCurve 1.0.1 安装
 
 ## 安装固定面板
 
@@ -24,5 +24,6 @@
 
 ## 注意
 
-- 不要把 KCurve 同时放进 `Scripts\KCurve.jsx`；1.0.0 只保留 ScriptUI Panels 入口，避免出现两个版本。
+- 不要把 KCurve 同时放进 `Scripts\KCurve.jsx`；1.0.1 只保留 ScriptUI Panels 入口，避免出现两个版本。
 - 首次打开会读取 EffectCraft 的界面语言；之后可以选择中文或 English，选择会记住。
+

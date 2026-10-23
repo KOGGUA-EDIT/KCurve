@@ -1,5 +1,5 @@
 /*
- * KCurve 1.0.0 — Flow-style easing curve editor for EffectCraft.
+ * KCurve 1.0.1 — Flow-style easing curve editor for EffectCraft.
  *
  * Run it from File ▸ Scripts ▸ Run Script File… (a floating, resizable palette), or install it
  * with File ▸ Scripts ▸ Install ScriptUI Panel… (the docked panel opens the floating editor).
@@ -61,7 +61,7 @@
 
 (function (thisObj) {
   // ---------------------------------------------------------------- constants
-  var KCURVE_VERSION = "1.0.0";
+  var KCURVE_VERSION = "1.0.1";
   var SETTINGS_SECTION = "KCurve";
   var SETTINGS_KEY = "state";
   var STATE_VERSION = 2;
@@ -519,7 +519,7 @@
     a.splice(i + 1, 0, { x: sp2.mid.x, y: sp2.mid.y, hIn: sp2.left.p2, hOut: sp2.right.p1, smooth: false });
     S.selectedAnchor = i + 1;
     clampAnchorHandles(i); clampAnchorHandles(i + 1); clampAnchorHandles(i + 2);
-    status(L("已添加关键帧点和操纵杆（共 " + a.length + " 个）", "Added a keyframe point and levers (" + a.length + " total)"));
+    status(TR("已添加关键帧点和操纵杆（共 " + a.length + " 个）", "Added a keyframe point and levers (" + a.length + " total)"));
     saveState(); redraw();
   }
   function deleteAnchor() {
@@ -529,7 +529,7 @@
       a.splice(i, 1);
       S.selectedAnchor = Math.max(1, Math.min(a.length - 1, i));
       clampAllAnchors();
-      status(L("已删除关键帧点（剩余 " + a.length + " 个）", "Deleted keyframe point (" + a.length + " left)"));
+      status(TR("已删除关键帧点（剩余 " + a.length + " 个）", "Deleted keyframe point (" + a.length + " left)"));
       saveState(); redraw();
       return;
     }
@@ -881,9 +881,9 @@
     if (!built.actions.length) {
       if (!silent) {
         var why = [];
-        if (built.skipped) why.push(L("跳过 Hold " + built.skipped, "skipped Hold " + built.skipped));
-        if (built.roving) why.push(L("跳过 Roving " + built.roving, "skipped Roving " + built.roving));
-        status(why.length ? L("没有写入：" + why.join("，"), "Nothing written: " + why.join(", ")) : "");
+        if (built.skipped) why.push(TR("跳过 Hold " + built.skipped, "skipped Hold " + built.skipped));
+        if (built.roving) why.push(TR("跳过 Roving " + built.roving, "skipped Roving " + built.roving));
+        status(why.length ? TR("没有写入：" + why.join("，"), "Nothing written: " + why.join(", ")) : "");
       }
       redraw();
       return 0;
@@ -894,11 +894,11 @@
     if (grouped) app.endUndoGroup();
     if (!silent) {
       var extra = [];
-      if (built.pairs) extra.push(L(built.pairs + " 组关键帧", built.pairs + " key pairs"));
-      if (S.anchors.length > 2) extra.push(L((S.anchors.length - 1) + " 段曲线", (S.anchors.length - 1) + " curve segments"));
-      if (built.skipped) extra.push(L("跳过 Hold " + built.skipped, "skipped Hold " + built.skipped));
-      if (built.roving) extra.push(L("跳过 Roving " + built.roving, "skipped Roving " + built.roving));
-      status(L("已应用 " + n + " 个缓动侧" + (extra.length ? "（" + extra.join("，") + "）" : ""),
+      if (built.pairs) extra.push(TR(built.pairs + " 组关键帧", built.pairs + " key pairs"));
+      if (S.anchors.length > 2) extra.push(TR((S.anchors.length - 1) + " 段曲线", (S.anchors.length - 1) + " curve segments"));
+      if (built.skipped) extra.push(TR("跳过 Hold " + built.skipped, "skipped Hold " + built.skipped));
+      if (built.roving) extra.push(TR("跳过 Roving " + built.roving, "skipped Roving " + built.roving));
+      status(TR("已应用 " + n + " 个缓动侧" + (extra.length ? "（" + extra.join("，") + "）" : ""),
         "Applied " + n + " ease side" + (n === 1 ? "" : "s") + (extra.length ? " (" + extra.join(", ") + ")" : "")));
     }
     redraw();
@@ -1002,7 +1002,7 @@
   };
   function en() { return !!(S && S.language === "en"); }
   function T(s) { return en() ? (EN[s] || s) : s; }
-  function L(zh, eng) { return en() ? eng : zh; }
+  function TR(zh, eng) { return en() ? eng : zh; }
   function groupDisplayName(g) {
     if (!g) return "";
     if (g.id === "builtin_classic") return en() ? "Classic" : "经典";
@@ -1640,7 +1640,7 @@
       else drawTool(g, c);
     }
     var sel = selectionCount();
-    var selText = sel.keys ? L("已选 " + sel.keys + " 键", sel.keys + " keys selected") : "";
+    var selText = sel.keys ? TR("已选 " + sel.keys + " 键", sel.keys + " keys selected") : "";
     var rightW = selText ? textWidth(g, selText, 9.5) + 8 : 0;
     var hint = iconHint();
     var statusW = Math.max(20, f.w - rightW - 4);
@@ -1652,7 +1652,7 @@
   function iconHint() {
     var h = hoverId;
     if (!h) return "";
-    if (h === "icon:lang") return L("语言", "Language");
+    if (h === "icon:lang") return TR("语言", "Language");
     if (h === "icon:import") return isMulti() ? T("导入选中关键帧为多点曲线") : T("导入选中关键帧的缓动曲线");
     if (h === "icon:overshoot") return T(S.allowOvershoot ? "允许超出边界（链条断开）" : "限制在 0–1 内（链条连接）");
     if (h === "icon:realtime") return T(isMulti() ? "实时写入（多点只预览）" : (S.realtime ? "实时写入：开" : "实时写入：关"));
@@ -1969,7 +1969,7 @@
     if (applyNow || (S.realtime && !isMulti())) {
       applyCurrent(false);
     } else {
-      status(L("已加载预设“" + presetDisplayName(preset) + "”，点 √ 写入关键帧",
+      status(TR("已加载预设“" + presetDisplayName(preset) + "”，点 √ 写入关键帧",
       "Loaded preset “" + presetDisplayName(preset) + "”; click √ to write keyframes"));
     }
     redraw();
@@ -1993,14 +1993,14 @@
   function saveCurrentAsPreset() {
     var groups = S.userGroups, names = [], values = [], i;
     for (i = 0; i < groups.length; i++) { names.push(groupDisplayName(groups[i])); values.push(groups[i].name); }
-    var name = L("我的缓动", "My Ease");
-    var groupName = groups.length ? groupDisplayName(groups[0]) : L("我的预设", "My Presets");
+    var name = TR("我的缓动", "My Ease");
+    var groupName = groups.length ? groupDisplayName(groups[0]) : TR("我的预设", "My Presets");
     var res = presetSaveDialog(name, groupName, names);
     if (!res) return;
     var gname = cleanName(res.group), pname = cleanName(res.name);
     for (i = 0; i < names.length; i++) if (names[i] === res.group) { gname = values[i]; break; }
     if (!pname) { st("预设名称不能为空", "Preset name cannot be empty"); return; }
-    if (builtinGroupNamed(gname)) { status(L("“" + gname + "”是内置组名，请换一个组名", "“" + gname + "” is a built-in group name; choose another")); return; }
+    if (builtinGroupNamed(gname)) { status(TR("“" + gname + "”是内置组名，请换一个组名", "“" + gname + "” is a built-in group name; choose another")); return; }
     var grp = null;
     for (i = 0; i < S.userGroups.length; i++) if (S.userGroups[i].name.toLowerCase() === gname.toLowerCase()) grp = S.userGroups[i];
     if (!grp) {
@@ -2011,17 +2011,17 @@
     for (i = 0; i < grp.presets.length; i++) if (grp.presets[i].name.toLowerCase() === pname.toLowerCase()) existing = grp.presets[i];
     if (existing) {
       existing.anchors = cloneAnchors(S.anchors);
-      status(L("已替换预设“" + pname + "”", "Replaced preset “" + pname + "”"));
+      status(TR("已替换预设“" + pname + "”", "Replaced preset “" + pname + "”"));
     } else {
       grp.presets.push({ id: makeId("p"), name: pname, anchors: cloneAnchors(S.anchors), multi: S.anchors.length > 2 });
-      status(L("已保存预设“" + pname + "”到“" + groupDisplayName(grp) + "”", "Saved preset “" + pname + "” to “" + groupDisplayName(grp) + "”"));
+      status(TR("已保存预设“" + pname + "”到“" + groupDisplayName(grp) + "”", "Saved preset “" + pname + "” to “" + groupDisplayName(grp) + "”"));
     }
     S.collapsed[grp.id] = false;
     saveState();
     redraw();
   }
   function renamePreset(group, preset) {
-    if (isBuiltinGroup(group)) { status(L("内置预设只读，可复制到“我的预设”后再改名", "Built-in presets are read-only; copy to My Presets first")); return; }
+    if (isBuiltinGroup(group)) { status(TR("内置预设只读，可复制到“我的预设”后再改名", "Built-in presets are read-only; copy to My Presets first")); return; }
     var res = inputDialog(T("重命名预设"), T("预设名称"), preset.name);
     if (res === null) return;
     var name = cleanName(res);
@@ -2032,16 +2032,16 @@
       }
     }
     preset.name = name;
-    status(L("预设已重命名为“" + name + "”", "Preset renamed to “" + name + "”"));
+    status(TR("预设已重命名为“" + name + "”", "Preset renamed to “" + name + "”"));
     saveState(); redraw();
   }
   function deletePreset(group, preset) {
     if (isBuiltinGroup(group)) { st("内置预设不能删除", "Built-in presets cannot be deleted"); return; }
-    if (!confirmDialog(T("删除预设"), L("确定删除预设“" + preset.name + "”吗？", "Delete preset “" + preset.name + "”?"))) return;
+    if (!confirmDialog(T("删除预设"), TR("确定删除预设“" + preset.name + "”吗？", "Delete preset “" + preset.name + "”?"))) return;
     for (var i = 0; i < group.presets.length; i++) {
       if (group.presets[i] === preset) { group.presets.splice(i, 1); break; }
     }
-    status(L("已删除预设“" + preset.name + "”", "Deleted preset “" + preset.name + "”"));
+    status(TR("已删除预设“" + preset.name + "”", "Deleted preset “" + preset.name + "”"));
     saveState(); redraw();
   }
   function duplicateToUserGroup(preset) {
@@ -2050,7 +2050,7 @@
       grp = { id: makeId("g"), name: "我的预设", presets: [] };
       S.userGroups.push(grp);
     }
-    var base = L(preset.name + " 副本", preset.name + " copy"), name = base, k = 2;
+    var base = TR(preset.name + " 副本", preset.name + " copy"), name = base, k = 2;
     function exists(nm) {
       for (var i = 0; i < grp.presets.length; i++) if (grp.presets[i].name.toLowerCase() === nm.toLowerCase()) return true;
       return false;
@@ -2058,19 +2058,19 @@
     while (exists(name)) { name = base + " " + k; k++; }
     grp.presets.push({ id: makeId("p"), name: name, anchors: cloneAnchors(preset.anchors), multi: preset.anchors.length > 2 });
     S.collapsed[grp.id] = false;
-    status(L("已复制到“" + groupDisplayName(grp) + "”", "Copied to “" + groupDisplayName(grp) + "”"));
+    status(TR("已复制到“" + groupDisplayName(grp) + "”", "Copied to “" + groupDisplayName(grp) + "”"));
     saveState(); redraw();
   }
   function duplicatePreset(group, preset) {
     if (isBuiltinGroup(group)) { duplicateToUserGroup(preset); return; }
-    var base = L(preset.name + " 副本", preset.name + " copy"), name = base, k = 2;
+    var base = TR(preset.name + " 副本", preset.name + " copy"), name = base, k = 2;
     function exists(nm) {
       for (var i = 0; i < group.presets.length; i++) if (group.presets[i].name.toLowerCase() === nm.toLowerCase()) return true;
       return false;
     }
     while (exists(name)) { name = base + " " + k; k++; }
     group.presets.push({ id: makeId("p"), name: name, anchors: cloneAnchors(preset.anchors), multi: preset.anchors.length > 2 });
-    status(L("已复制预设“" + name + "”", "Duplicated preset “" + name + "”"));
+    status(TR("已复制预设“" + name + "”", "Duplicated preset “" + name + "”"));
     saveState(); redraw();
   }
   function createGroup() {
@@ -2078,7 +2078,7 @@
     if (res === null) return;
     var name = cleanName(res);
     if (!name) { st("组名称不能为空", "Group name cannot be empty"); return; }
-    if (builtinGroupNamed(name)) { status(L("“" + name + "”是内置组名", "“" + name + "” is a built-in group name")); return; }
+    if (builtinGroupNamed(name)) { status(TR("“" + name + "”是内置组名", "“" + name + "” is a built-in group name")); return; }
     for (var i = 0; i < S.userGroups.length; i++) if (S.userGroups[i].name.toLowerCase() === name.toLowerCase()) {
       st("已有同名预设组", "A group with that name already exists"); return;
     }
@@ -2087,7 +2087,7 @@
     if (!S.groupOrder) S.groupOrder = [];
     S.groupOrder.push(g.id);
     S.collapsed[g.id] = false;
-    status(L("已新建预设组“" + name + "”", "Created preset group “" + name + "”"));
+    status(TR("已新建预设组“" + name + "”", "Created preset group “" + name + "”"));
     saveState(); redraw();
   }
   function renameGroup(group) {
@@ -2095,20 +2095,20 @@
     if (res === null) return;
     var name = cleanName(res);
     if (!name) { st("组名称不能为空", "Group name cannot be empty"); return; }
-    if (builtinGroupNamed(name)) { status(L("“" + name + "”是内置组名", "“" + name + "” is a built-in group name")); return; }
+    if (builtinGroupNamed(name)) { status(TR("“" + name + "”是内置组名", "“" + name + "” is a built-in group name")); return; }
     for (var i = 0; i < S.userGroups.length; i++) {
       if (S.userGroups[i] !== group && S.userGroups[i].name.toLowerCase() === name.toLowerCase()) {
         st("已有同名预设组", "A group with that name already exists"); return;
       }
     }
     group.name = name;
-    status(L("预设组已重命名为“" + name + "”", "Preset group renamed to “" + name + "”"));
+    status(TR("预设组已重命名为“" + name + "”", "Preset group renamed to “" + name + "”"));
     saveState(); redraw();
   }
   function deleteGroup(group) {
     if (isBuiltinGroup(group)) { st("内置预设组不能删除", "Built-in preset groups cannot be deleted"); return; }
     if (S.userGroups.length <= 1) { st("至少保留一个自定义预设组", "Keep at least one custom preset group"); return; }
-    if (!confirmDialog(T("删除预设组"), L("确定删除“" + groupDisplayName(group) + "”及其中的 " + group.presets.length + " 个预设吗？",
+    if (!confirmDialog(T("删除预设组"), TR("确定删除“" + groupDisplayName(group) + "”及其中的 " + group.presets.length + " 个预设吗？",
       "Delete “" + groupDisplayName(group) + "” and its " + group.presets.length + " pre" + (group.presets.length === 1 ? "set" : "sets") + "?"))) return;
     for (var i = 0; i < S.userGroups.length; i++) {
       if (S.userGroups[i] === group) { S.userGroups.splice(i, 1); break; }
@@ -2118,7 +2118,7 @@
         if (S.groupOrder[oi] === group.id) { S.groupOrder.splice(oi, 1); break; }
       }
     }
-    status(L("已删除预设组“" + groupDisplayName(group) + "”", "Deleted preset group “" + groupDisplayName(group) + "”"));
+    status(TR("已删除预设组“" + groupDisplayName(group) + "”", "Deleted preset group “" + groupDisplayName(group) + "”"));
     saveState(); redraw();
   }
 
@@ -2726,7 +2726,7 @@
     if (outside) S.allowOvershoot = true;
     if (!S.allowOvershoot) clampAllAnchors();
     saveState();
-    status(L("已读取 " + pts.length + " 个关键帧作为多点曲线（每个点=一个关键帧）",
+    status(TR("已读取 " + pts.length + " 个关键帧作为多点曲线（每个点=一个关键帧）",
       "Imported " + pts.length + " keyframes as a multi-point curve (each point is a keyframe)"));
     redraw();
     return true;
@@ -2879,4 +2879,5 @@
     try { alert("KCurve: " + msg); } catch (e2) {}
   }
 })(this);
+
 
