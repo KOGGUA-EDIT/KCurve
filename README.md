@@ -1,9 +1,12 @@
 # KCurve
 
-**EffectCraft 的 曲线编辑器。**  
+**EffectCraft 的 Flow / Kease 风格缓动曲线编辑器。**  
 单文件 ScriptUI 脚本，固定停靠在 EffectCraft 面板中，支持单段曲线、多点关键帧、超出边界和预设库。
 
 ![KCurve 在 EffectCraft 中](docs/screenshots/effectcraft.png)
+
+当前版本：**1.0.1**  
+适用：**EffectCraft 0.13.0 / Windows**
 
 KCurve 把关键帧的缓动从数字参数变成一条可以拖的曲线：
 
@@ -134,9 +137,11 @@ KCurve 把关键帧的缓动从数字参数变成一条可以拖的曲线：
 
 ## 贡献者
 
-- **KOGUGUA-EDIT** — 项目发起、设计、测试与发布
+- **KOGGUA-EDIT** — 项目发起、设计、测试与发布
 - **DeepSeek** — AI 编程助手，参与代码实现、文档与打包
 
 ## License
 
 MIT。见 [LICENSE](LICENSE)。
+
+
