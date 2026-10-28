@@ -1,5 +1,5 @@
 /*
- * KCurve 1.0.1 — Flow-style easing curve editor for EffectCraft.
+ * KCurve 1.0.10 — Flow-style easing curve editor for EffectCraft.
  *
  * Run it from File ▸ Scripts ▸ Run Script File… (a floating, resizable palette), or install it
  * with File ▸ Scripts ▸ Install ScriptUI Panel… (the docked panel opens the floating editor).
@@ -61,10 +61,10 @@
 
 (function (thisObj) {
   // ---------------------------------------------------------------- constants
-  var KCURVE_VERSION = "1.0.1";
+  var KCURVE_VERSION = "1.0.10";
   var SETTINGS_SECTION = "KCurve";
   var SETTINGS_KEY = "state";
-  var STATE_VERSION = 2;
+  var STATE_VERSION = 5;
   var DEFAULT_W = 600;
   var DEFAULT_H = 780;
   var MIN_W = 380;
@@ -220,15 +220,6 @@
     }
     return w;
   }
-  function text(g, s, x, y, size, color, style, align, maxW) {
-    s = String(s);
-    if (maxW !== undefined && maxW > 0) s = ellipsize(g, s, size, maxW);
-    var w = measure(g, s, size);
-    if (align === "center") x -= w / 2;
-    else if (align === "right") x -= w;
-    g.font = font(size, style);
-    g.drawString(s, g.newPen(g.PenType.SOLID_COLOR, color, 1), x, y);
-  }
   function textWidth(g, s, size, style) { return measure(g, s, size, style); }
   // Draw text vertically centred inside a control rectangle; prevents the "text sits too low"
   // look and the overlapping labels the first version had.
@@ -249,10 +240,11 @@
   // keep that convention.
   function roundPath(g, x, y, w, h, r, segOverride) {
     r = Math.max(0, Math.min(r, Math.min(w, h) / 2));
-    // Keep the segment count modest: the canvas is fully redrawn on every mouse move, so
-    // 96-segment corners everywhere made dragging noticeably laggy. The confirm pill gets an
-    // explicit higher count from its caller; ordinary cards/rows stay cheap.
-    var i, a, seg = segOverride || Math.max(4, Math.min(14, Math.round(r * 0.7)));
+    // Every rounded shape is painted as a polyline and the canvas is fully repainted while
+    // dragging, so the corner segment count is a direct per-frame cost. At 1x with no
+    // anti-aliasing, 4 segments per corner of a 10px radius are within ~0.2px of the true arc;
+    // only large radii need a couple more.
+    var i, a, seg = segOverride || Math.max(3, Math.min(6, Math.round(r * 0.4)));
     g.newPath();
     g.moveTo(x + r, y);
     g.lineTo(x + w - r, y);
@@ -297,6 +289,12 @@
     g.newPath();
     g.rectPath(x, y, w, h);
     g.fillPath(g.newBrush(g.BrushType.SOLID_COLOR, color));
+  }
+  function strokeRect(g, x, y, w, h, color, width) {
+    if (w <= 0 || h <= 0) return;
+    g.newPath();
+    g.rectPath(x, y, w, h);
+    g.strokePath(g.newPen(g.PenType.SOLID_COLOR, color, width || 1));
   }
   function circle(g, x, y, r, fillColor, strokeColor, strokeW) {
     g.newPath();
@@ -754,6 +752,7 @@
     }
   }
   var liveGroupOpen = false;
+  var lastLiveMs = 0;
   function writeActions(actions) {
     var n = 0, i;
     for (i = 0; i < actions.length; i++) {
@@ -785,26 +784,70 @@
     for (var i = 1; i <= p.numKeys; i++) if (Math.abs(p.keyTime(i) - t) <= tol) return i;
     return -1;
   }
+  // Multi-point writes rebuild keyframes (remove + add), and the timeline drops its selection when
+  // that happens. A script cannot assign Property.selectedKeys (read-only in 0.17.0), so the
+  // selection is put back with the engine command keys.select. Keys are addressed by layer id
+  // (layer.__id) plus property uid (property.__uid) with the comp time base, because keyTime()
+  // returns comp seconds in this host. Builds without those ids simply skip the restore.
+  function sameValue(a, b) {
+    if (typeof a === "number" && typeof b === "number") return Math.abs(a - b) < 1e-9;
+    if (a instanceof Array && b instanceof Array && a.length === b.length) {
+      for (var i = 0; i < a.length; i++) if (Math.abs((a[i] || 0) - (b[i] || 0)) > 1e-9) return false;
+      return true;
+    }
+    return false;
+  }
+  function selectionMatches(p, idxs) {
+    var sel = p.selectedKeys || [];
+    if (sel.length !== idxs.length) return false;
+    for (var i = 0; i < sel.length; i++) if (sel[i] !== idxs[i]) return false;
+    return true;
+  }
+  // entries: [{ p: Property, idxs: [key index…] }] — leaves exactly those keys selected.
+  function selectKeyIndices(entries) {
+    var keys = [], i, j;
+    for (i = 0; i < entries.length; i++) {
+      var p = entries[i].p, layer = null;
+      try { layer = p.propertyGroup(p.propertyDepth); } catch (e) {}
+      if (!layer || layer.__id === undefined || p.__uid === undefined) continue;
+      for (j = 0; j < entries[i].idxs.length; j++) {
+        var k = entries[i].idxs[j];
+        if (k >= 1 && k <= p.numKeys) keys.push({ layer: layer.__id, prop: p.__uid, time: p.keyTime(k) });
+      }
+    }
+    if (!keys.length) return false;
+    try { app.run("keys.select", { keys: keys, timeBase: "comp" }); return true; } catch (e) { return false; }
+  }
   // Multi-point apply: the points are keyframes between the first and last SELECTED keys.
   // Every point gets a key at a proportionally spaced time; missing keys are added, existing keys
   // updated. The Hermite derivatives then become the Bezier eases of each segment.
-  function applyMultiCurve() {
+  // live=true is the 实时写入 drag path: the undo group stays open for the whole drag and the status
+  // line is left alone. The selection is restored either way, so applying never drops it.
+  function applyMultiCurve(live) {
     var keyed = selectedKeyed();
-    if (!keyed.length) { st("先选中至少两个关键帧（多点写入用首尾键作为范围）", "Select at least two keyframes (first/last define the range)"); redraw(); return 0; }
+    if (!keyed.length) {
+      if (!live) {
+        st("先选中至少两个关键帧（多点写入用首尾键作为范围）", "Select at least two keyframes (first/last define the range)");
+        redraw();
+      }
+      return 0;
+    }
     var pts = S.anchors;
     var comp = app.project.activeItem;
     var fd = comp && comp.frameDuration ? comp.frameDuration : 1 / 30;
     var tol = fd * 0.3;
     var added = 0, updated = 0, removed = 0, props = 0, skipped = 0, extras = 0, i, j, k;
-    app.beginUndoGroup("KCurve: Write Keyframes");
+    var keep = [], opened = false;
+    if (!liveGroupOpen) { app.beginUndoGroup("KCurve: Write Keyframes"); opened = true; }
+    if (live) liveGroupOpen = true;
     try {
       for (i = 0; i < keyed.length; i++) {
         var p = keyed[i].prop, keys = keyed[i].keys;
-        if (keys.length < 2) { skipped++; continue; }
+        if (keys.length < 2) { skipped++; keep.push({ p: p, idxs: keys }); continue; }
         var t0 = p.keyTime(keys[0]), t1 = p.keyTime(keys[keys.length - 1]);
-        if (!(t1 > t0)) { skipped++; continue; }
+        if (!(t1 > t0)) { skipped++; keep.push({ p: p, idxs: keys }); continue; }
         var v0 = p.keyValue(keys[0]), v1 = p.keyValue(keys[keys.length - 1]);
-        if (valueSpan(v0, v1) < 1e-9) { skipped++; continue; }
+        if (valueSpan(v0, v1) < 1e-9) { skipped++; keep.push({ p: p, idxs: keys }); continue; }
         var selectedSet = {};
         for (k = 0; k < keys.length; k++) selectedSet[keys[k]] = true;
         for (k = 1; k <= p.numKeys; k++) {
@@ -822,22 +865,49 @@
             times.push(tt); vals.push(vv);
           }
         }
-        // Each point is a keyframe: replace the selected keys instead of leaving the old ones
-        // behind (otherwise moving a point in time would duplicate the key). Keys in the range
-        // that were not selected are left alone; status reports them.
-        if (typeof p.removeKey === "function") {
-          for (k = keys.length - 1; k >= 0; k--) {
-            try { p.removeKey(keys[k]); removed++; } catch (e) {}
-          }
-        }
+        // Fast path: the timeline already holds exactly these keys, so only the values (and the
+        // eases below) change. Keeping the keys in place keeps the timeline selection and makes a
+        // live drag cheap — removing and re-adding every key on each mouse move made the timeline
+        // flicker and lose the selection that this function then had to restore.
+        var idxs = [], matched = true;
         for (j = 0; j < times.length; j++) {
-          var existed = findKeyIndexAt(p, times[j], tol) > 0;
-          p.setValueAtTime(times[j], vals[j]);
-          if (existed) updated++; else added++;
+          var ix = findKeyIndexAt(p, times[j], tol);
+          if (ix < 0) { matched = false; break; }
+          idxs.push(ix);
         }
-        // Resolve the key indices after insertion and turn each segment's handles into eases.
-        var idxs = [];
-        for (j = 0; j < times.length; j++) idxs.push(findKeyIndexAt(p, times[j], fd * 0.51));
+        if (matched) {
+          var inRange = 0;
+          for (k = 1; k <= p.numKeys; k++) {
+            var rt = p.keyTime(k);
+            if (rt >= t0 - tol && rt <= t1 + tol) inRange++;
+          }
+          if (inRange !== times.length) matched = false;
+        }
+        if (matched) {
+          for (j = 0; j < times.length; j++) {
+            if (!sameValue(p.keyValue(idxs[j]), vals[j])) {
+              p.setValueAtTime(p.keyTime(idxs[j]), vals[j]);
+              updated++;
+            }
+          }
+        } else {
+          // Each point is a keyframe: replace the selected keys instead of leaving the old ones
+          // behind (otherwise moving a point in time would duplicate the key). Keys in the range
+          // that were not selected are left alone; status reports them.
+          if (typeof p.removeKey === "function") {
+            for (k = keys.length - 1; k >= 0; k--) {
+              try { p.removeKey(keys[k]); removed++; } catch (e) {}
+            }
+          }
+          for (j = 0; j < times.length; j++) {
+            var existed = findKeyIndexAt(p, times[j], tol) > 0;
+            p.setValueAtTime(times[j], vals[j]);
+            if (existed) updated++; else added++;
+          }
+          // Resolve the key indices after insertion and turn each segment's handles into eases.
+          idxs = [];
+          for (j = 0; j < times.length; j++) idxs.push(findKeyIndexAt(p, times[j], fd * 0.51));
+        }
         for (j = 0; j + 1 < idxs.length; j++) {
           var a = idxs[j], b = idxs[j + 1];
           if (a < 1 || b < 1 || b <= a) { continue; }
@@ -855,11 +925,22 @@
           easeSide(p, a, true, makeEases(s, cy1 / ex1, ex1 * 100));
           easeSide(p, b, false, makeEases(s, (1 - cy2) / (1 - ex2), (1 - ex2) * 100));
         }
+        keep.push({ p: p, idxs: idxs });
         props++;
       }
     } finally {
-      app.endUndoGroup();
+      if (opened && !live) { try { app.endUndoGroup(); } catch (e) {} }
+      // Put the timeline selection back even if something above threw: applying the curve must not
+      // leave the user with nothing selected.
+      try {
+        var needSelect = false;
+        for (i = 0; i < keep.length; i++) {
+          if (!selectionMatches(keep[i].p, keep[i].idxs)) { needSelect = true; break; }
+        }
+        if (needSelect) selectKeyIndices(keep);
+      } catch (e) {}
     }
+    if (live) return added + updated;
     var msg = en()
       ? "Wrote multi-point curve: " + (props ? props + " propert" + (props === 1 ? "y" : "ies") : "0 properties") +
         (removed ? ", replaced " + removed + " selected keys" : "") +
@@ -904,8 +985,16 @@
     redraw();
     return n;
   }
-  function applyLive() {
-    if (isMulti()) return; // multi-point writes keyframes, not live eases
+  function applyLive(force) {
+    if (isMulti()) {
+      // Multi-point writes real keyframes (not just eases), so throttle the writes to roughly the
+      // canvas repaint cadence; mouseup forces a final exact write while the undo group is open.
+      var t = nowMs();
+      if (!force && t - lastLiveMs < 40) return;
+      lastLiveMs = t;
+      try { applyMultiCurve(true); } catch (e) {}
+      return;
+    }
     var built = buildActions(S.applyMode || "inout");
     if (!built.actions.length) return;
     if (!liveGroupOpen) {
@@ -990,6 +1079,7 @@
     "复制到我的预设": "Copy to My Presets",
     "重命名…": "Rename…",
     "复制": "Duplicate",
+    "用当前曲线更新该预设": "Update this preset with the current curve",
     "显示这个组": "Show this group",
     "新建组…": "New Group…",
     "重命名组…": "Rename Group…",
@@ -1005,8 +1095,11 @@
   function TR(zh, eng) { return en() ? eng : zh; }
   function groupDisplayName(g) {
     if (!g) return "";
-    if (g.id === "builtin_classic") return en() ? "Classic" : "经典";
-    if (g.id === "g_user" && g.name === "我的预设") return en() ? "My Presets" : g.name;
+    // The built-in groups are migrated into editable user groups; keep translating their default
+    // names, but respect a name the user gave them.
+    if (g.id === "builtin_classic" && (g.name === "经典" || g.name === "Classic")) return en() ? "Classic" : "经典";
+    if (g.id === "builtin_bounce" && (g.name === "弹跳" || g.name === "Bounce")) return en() ? "Bounce" : "弹跳";
+    if (g.id === "g_user" && (g.name === "我的预设" || g.name === "My Presets")) return en() ? "My Presets" : "我的预设";
     return g.name;
   }
   var EN_PRESETS = {
@@ -1073,6 +1166,13 @@
     } catch (e) {}
     if (!hadLanguage) st.language = detectHostLanguage();
     if (!st.userGroups.length) st.userGroups = [{ id: "g_user", name: "我的预设", presets: [] }];
+    // STATE_VERSION 3: the built-in preset groups moved into the editable user groups (one-time).
+    // STATE_VERSION 4: the bounce group was added after that migration, so v3 states get it once.
+    // STATE_VERSION 5: the demo bounce curves are replaced by copies of 我的预设.
+    if (loadedVersion >= 3) st.builtinsMigrated = true;
+    if (!st.builtinsMigrated) migrateBuiltins(st);
+    else if (loadedVersion < 4) migrateBuiltinGroup(st, "builtin_bounce");
+    if (loadedVersion < 5) migrateBounceFromUserGroups(st);
     S = st;
     ensureGroupOrder();
     if (!S.selectedGroupId || !groupById(S.selectedGroupId)) {
@@ -1109,6 +1209,87 @@
   }
   function makeId(prefix) {
     return prefix + "_" + (new Date().getTime()).toString(36) + "_" + Math.floor(Math.random() * 100000).toString(36);
+  }
+  // The built-in groups used to be read-only code data rebuilt on every launch. They are migrated
+  // once into S.userGroups (keeping their ids and anchors) so every preset can be renamed,
+  // deleted, duplicated or updated from the current curve. Runs after the settings are loaded,
+  // when BUILTIN_GROUPS has been initialised.
+  function cloneBuiltinGroup(bg) {
+    var presets = [], j;
+    for (j = 0; j < bg.presets.length; j++) {
+      presets.push({
+        id: bg.presets[j].id,
+        name: bg.presets[j].name,
+        anchors: cloneAnchors(bg.presets[j].anchors),
+        multi: bg.presets[j].anchors.length > 2
+      });
+    }
+    return { id: bg.id, name: bg.name, presets: presets };
+  }
+  function migrateBuiltins(st) {
+    var existing = st.userGroups instanceof Array ? st.userGroups : [], byId = {}, i, out = [];
+    for (i = 0; i < existing.length; i++) byId[existing[i].id] = existing[i];
+    for (i = 0; i < BUILTIN_GROUPS.length; i++) {
+      var bg = BUILTIN_GROUPS[i];
+      if (byId[bg.id]) { out.push(byId[bg.id]); delete byId[bg.id]; continue; }
+      if (!bg.presets.length) continue;   // empty template group (弹跳) is created by v5 instead
+      out.push(cloneBuiltinGroup(bg));
+    }
+    for (i = 0; i < existing.length; i++) if (byId[existing[i].id]) out.push(existing[i]);
+    st.userGroups = out.length ? out : [{ id: "g_user", name: "我的预设", presets: [] }];
+    st.builtinsMigrated = true;
+  }
+  // A built-in group added after the one-time migration (state version 4) is appended once,
+  // next to the other built-in groups, without touching the user's groups.
+  function migrateBuiltinGroup(st, id) {
+    var i;
+    for (i = 0; i < st.userGroups.length; i++) if (st.userGroups[i].id === id) return;
+    for (i = 0; i < BUILTIN_GROUPS.length; i++) {
+      if (BUILTIN_GROUPS[i].id !== id) continue;
+      if (!BUILTIN_GROUPS[i].presets.length) return;
+      st.userGroups.push(cloneBuiltinGroup(BUILTIN_GROUPS[i]));
+      var order = st.groupOrder instanceof Array ? st.groupOrder : [];
+      if (order.indexOf(id) < 0) {
+        var at = order.indexOf("builtin_classic");
+        order.splice(at >= 0 ? at + 1 : order.length, 0, id);
+        st.groupOrder = order;
+      }
+      return;
+    }
+  }
+  // STATE_VERSION 5: the invented demo bounce presets are gone. The 弹跳 group instead receives
+  // a one-time copy of the presets in 我的预设 (its own group is left alone).
+  function migrateBounceFromUserGroups(st) {
+    var user = null, bounce = null, i;
+    for (i = 0; i < st.userGroups.length; i++) {
+      if (st.userGroups[i].id === "g_user") user = st.userGroups[i];
+      if (st.userGroups[i].id === "builtin_bounce") bounce = st.userGroups[i];
+    }
+    if (!bounce) {
+      if (!user || !user.presets.length) return;
+      bounce = { id: "builtin_bounce", name: "弹跳", presets: [] };
+      var at = -1;
+      for (i = 0; i < st.userGroups.length; i++) if (st.userGroups[i].id === "builtin_classic") at = i;
+      st.userGroups.splice(at >= 0 ? at + 1 : st.userGroups.length, 0, bounce);
+      var order = st.groupOrder instanceof Array ? st.groupOrder : [];
+      if (order.indexOf("builtin_bounce") < 0) {
+        var oi = order.indexOf("builtin_classic");
+        order.splice(oi >= 0 ? oi + 1 : order.length, 0, "builtin_bounce");
+        st.groupOrder = order;
+      }
+    }
+    var presets = [];
+    if (user) {
+      for (i = 0; i < user.presets.length; i++) {
+        presets.push({
+          id: makeId("p"),
+          name: user.presets[i].name,
+          anchors: cloneAnchors(user.presets[i].anchors),
+          multi: user.presets[i].anchors.length > 2
+        });
+      }
+    }
+    bounce.presets = presets;
   }
   function saveState() {
     if (!S) return;
@@ -1218,10 +1399,16 @@
     if (!win || spinTask !== null) return;
     try { spinTask = app.scheduleTask("KCurveSpinTick()", 80, true); } catch (e) { spinTask = null; }
   }
+  var lastSpinSelection = -1;
   thisObj.KCurveSpinTick = function () {
     try {
       if (!win || !canvas) { stopSpinTask(); return; }
-      redraw();
+      // The gear's orbiting notch only animates while live write is on. Otherwise repaint only
+      // when the timeline selection changed (the status line shows it), instead of rebuilding the
+      // whole draw list 12.5 times a second for a panel that looks the same.
+      if (S.realtime) { redraw(); return; }
+      var sc = selectionCount();
+      if (sc.keys !== lastSpinSelection) { lastSpinSelection = sc.keys; redraw(); }
     } catch (e) { stopSpinTask(); }
   };
 
@@ -1250,11 +1437,21 @@
         { id: "cl-back-in", name: "Back In", anchors: presetAnchors(0.36, 0, 0.66, -0.56) },
         { id: "cl-linear", name: "Linear", anchors: presetAnchors(1 / 3, 1 / 3, 2 / 3, 2 / 3) }
       ]
+    },
+    {
+      // The group itself is kept so 1.0.9 can fill it with copies of the user's 我的预设
+      // (the invented demo curves were removed). An empty template is not migrated on a fresh
+      // install; migrateBounceFromUserGroups() creates it when there is something to copy.
+      id: "builtin_bounce", name: "弹跳", builtin: true, presets: []
     }
   ];
   function allGroups() {
     var byId = {}, i, all = [];
-    for (i = 0; i < BUILTIN_GROUPS.length; i++) { byId[BUILTIN_GROUPS[i].id] = BUILTIN_GROUPS[i]; all.push(BUILTIN_GROUPS[i]); }
+    // Before the one-time migration the built-ins come from code; afterwards they are ordinary
+    // (editable) user groups.
+    if (!S.builtinsMigrated) {
+      for (i = 0; i < BUILTIN_GROUPS.length; i++) { byId[BUILTIN_GROUPS[i].id] = BUILTIN_GROUPS[i]; all.push(BUILTIN_GROUPS[i]); }
+    }
     for (i = 0; i < S.userGroups.length; i++) { byId[S.userGroups[i].id] = S.userGroups[i]; all.push(S.userGroups[i]); }
     var out = [], seen = {}, order = S.groupOrder || [];
     for (i = 0; i < order.length; i++) {
@@ -1270,7 +1467,7 @@
     return parts.join("|");
   }
   function ensureGroupOrder() {
-    var all = BUILTIN_GROUPS.concat(S.userGroups), known = {}, order = [], i;
+    var all = S.builtinsMigrated ? S.userGroups : BUILTIN_GROUPS.concat(S.userGroups), known = {}, order = [], i;
     for (i = 0; i < all.length; i++) known[all[i].id] = true;
     if (S.groupOrder instanceof Array) {
       for (i = 0; i < S.groupOrder.length; i++) {
@@ -1290,12 +1487,6 @@
     return null;
   }
   function isBuiltinGroup(g) { return !!g.builtin; }
-  function builtinGroupNamed(name) {
-    for (var i = 0; i < BUILTIN_GROUPS.length; i++) {
-      if (BUILTIN_GROUPS[i].name.toLowerCase() === String(name).toLowerCase()) return true;
-    }
-    return false;
-  }
   function groupCollapsed(g) { return !!S.collapsed[g.id]; }
   // EffectCraft 0.13's GUI does not run repeating app.scheduleTask callbacks (tested with a
   // docked panel and script.runTasks: "scripting is not available in this build"), so a real
@@ -1379,52 +1570,56 @@
     }
   }
   // ---------------------------------------------------------------- toolbar layout
+  // Two fixed rows: editing actions on top; language, live write and the write-side modes
+  // (In / Out / Both) underneath. Fixed rows keep the tools from wrapping unpredictably.
   function layoutFunction(g, x, y, w) {
-    var tools = [
-      { id: "icon:lang", type: "tool", icon: "lang" },
+    var top = [
       { id: "icon:import", type: "tool", icon: "import" },
       { id: "icon:overshoot", type: "tool", icon: "overshoot", on: !!S.allowOvershoot },
-      { id: "icon:realtime", type: "tool", icon: "gear", on: !!S.realtime },
       { id: "icon:add", type: "tool", icon: "plus" },
       { id: "icon:del", type: "tool", icon: "minus" }
     ];
-    var modes = [];
     if (isMulti()) {
-      tools.push({
+      top.push({
         id: "icon:smooth", type: "tool", icon: "smooth",
         active: !!(S.anchors[S.selectedAnchor] && S.anchors[S.selectedAnchor].smooth !== false)
       });
-    } else {
-      modes.push({ id: "mode:in", type: "mode", icon: "triLeft", active: S.applyMode === "in" });
-      modes.push({ id: "mode:out", type: "mode", icon: "triRight", active: S.applyMode === "out" });
-      modes.push({ id: "mode:inout", type: "mode", icon: "diamond", active: S.applyMode === "inout" });
     }
     var apply = { id: "button:apply", type: "apply", icon: "check", w: 36, h: 30 };
+    var lower = [
+      { id: "icon:lang", type: "tool", icon: "lang" },
+      { id: "icon:realtime", type: "tool", icon: "gear", on: !!S.realtime }
+    ];
+    // The write-side selector is always visible. In multi-point mode it is dimmed: applying a
+    // multi-point curve writes both sides of every segment, so In/Out/Both do not apply there.
+    var multiMode = isMulti();
+    lower.push({ id: "mode:in", type: "mode", icon: "triLeft", active: !multiMode && S.applyMode === "in", disabled: multiMode });
+    lower.push({ id: "mode:out", type: "mode", icon: "triRight", active: !multiMode && S.applyMode === "out", disabled: multiMode });
+    lower.push({ id: "mode:inout", type: "mode", icon: "diamond", active: !multiMode && S.applyMode === "inout", disabled: multiMode });
     var gap = 3, rowH = 32, controls = [];
-    var rows = [];
     function placeRow(list, startX, startY) {
-      var cx = startX, cy = startY, placed = [];
+      var cx = startX, cy = startY;
       for (var i = 0; i < list.length; i++) {
         var c = list[i];
         c.w = c.type === "mode" ? 26 : (c.type === "apply" ? 36 : 28);
         c.h = c.type === "apply" ? 30 : (c.type === "mode" ? 26 : 28);
-        if (cx > startX && cx + c.w > startX + w) { cx = startX; cy += rowH + gap; }
         c.x = cx;
         c.y = cy + (rowH - c.h) / 2;
         c.rect = { x: c.x, y: c.y, w: c.w, h: c.h };
         controls.push(c);
-        placed.push(c);
         cx += c.w + gap;
       }
       return { bottom: cy + rowH, right: cx };
     }
-    var r;
-    if (modes.length && w < 300) {
-      r = placeRow(tools, x, y);
-      placeRow(modes.concat([apply]), x, r.bottom + gap);
-    } else {
-      placeRow(tools.concat(modes, [apply]), x, y);
-    }
+    var r1 = placeRow(top, x, y);
+    // The confirm button takes every pixel left over in the top row; the check is centred in it.
+    apply.x = r1.right;
+    apply.y = y + (rowH - apply.h) / 2;
+    apply.w = Math.max(36, (x + w) - apply.x);
+    apply.iconX = apply.x + apply.w / 2;
+    apply.rect = { x: apply.x, y: apply.y, w: apply.w, h: apply.h };
+    controls.push(apply);
+    placeRow(lower, x, r1.bottom + gap);
     var bottom = 0;
     for (var i = 0; i < controls.length; i++) bottom = Math.max(bottom, controls[i].y + controls[i].h);
     var statusY = bottom + 5;
@@ -1437,7 +1632,9 @@
   function visibleGroups() {
     var all = allGroups();
     if (S.showAllGroups) return all;
-    return all.slice(0, 3);
+    // Four built-in groups now fit on one chip row at the docked width; keep one slot for a
+    // user-created group before the "all groups" toggle kicks in.
+    return all.slice(0, 5);
   }
 
   function layoutPresets(g, rect) {
@@ -1545,8 +1742,10 @@
   function strokeCurveSegments(g, segs, mx, my, pen) {
     for (var si = 0; si < segs.length; si++) {
       g.newPath();
-      for (var tt = 0; tt <= 56; tt++) {
-        var pt = cubicPointAt(segs[si], tt / 56);
+      // 32 samples are sub-pixel accurate for a curve at this canvas size; the old 56 only
+      // added path points to every repaint.
+      for (var tt = 0; tt <= 32; tt++) {
+        var pt = cubicPointAt(segs[si], tt / 32);
         if (tt === 0) g.moveTo(mx(pt[0]), my(pt[1]));
         else g.lineTo(mx(pt[0]), my(pt[1]));
       }
@@ -1555,39 +1754,19 @@
   }
   function drawEditor(g, lay) {
     var r = lay.editor, multi = isMulti();
-    fillRound(g, r.x, r.y, r.w, r.h, 24, P.surface);
-    if (multi) {
-      var sel = clamp(S.selectedAnchor | 0, 0, S.anchors.length - 1);
-      var info = en()
-        ? S.anchors.length + " keyframes   ·   selected " + (sel + 1) + "   ·   t " +
-          fmt(S.anchors[sel].x, 2) + "   v " + fmt(S.anchors[sel].y, 2)
-        : S.anchors.length + " 个关键帧   ·   选中 " + (sel + 1) + "   ·   t " +
-          fmt(S.anchors[sel].x, 2) + "   v " + fmt(S.anchors[sel].y, 2);
-      textBox(g, info, r.x + 12, r.y + 4, r.w - 24, 20, 9.2, P.dim, "center", "REGULAR");
-    } else {
-      var seg = segmentOf(S.anchors, 0);
-      var num = "cubic-bezier(" + fmt(seg.x1, 3) + ", " + fmt(seg.y1, 3) + ", " + fmt(seg.x2, 3) + ", " + fmt(seg.y2, 3) + ")";
-      textBox(g, num, r.x + 12, r.y + 4, r.w - 24, 20, 9.2, P.dim, "center", "REGULAR");
-    }
-    var plot = { x: r.x + 10, y: r.y + 28, w: r.w - 20, h: r.h - 36 };
-    if (plot.h < 75) plot.h = 75;
-    fillRound(g, plot.x, plot.y, plot.w, plot.h, 18, P.bg);
+    // 1.0.8: the editor is one dark rect with a one-pixel outline; the old thick card frame
+    // (and its 10px border) is gone, so the curve gets the whole editor area.
+    fillRect(g, r.x, r.y, r.w, r.h, P.bg);
+    strokeRect(g, r.x + 0.5, r.y + 0.5, Math.max(1, r.w - 1), Math.max(1, r.h - 1), withAlpha(P.outline, 0.7), 1);
+    var plot = { x: r.x + 1, y: r.y + 1, w: Math.max(1, r.w - 2), h: Math.max(1, r.h - 2) };
     var view = viewBounds();
     function mx(v) { return plot.x + (v - view.x0) / (view.x1 - view.x0) * plot.w; }
     function my(v) { return plot.y + plot.h - (v - view.y0) / (view.y1 - view.y0) * plot.h; }
 
     if (S.allowOvershoot) {
       var sx0 = mx(0), sy0 = my(1), sx1 = mx(1), sy1 = my(0);
-      strokeRound(g, sx0, sy0, Math.max(1, sx1 - sx0), Math.max(1, sy1 - sy0), 10, withAlpha(P.outline, 0.35), 1);
+      strokeRect(g, sx0, sy0, Math.max(1, sx1 - sx0), Math.max(1, sy1 - sy0), withAlpha(P.outline, 0.35), 1);
     }
-    var grid = [0, 0.25, 0.5, 0.75, 1], gi;
-    for (gi = 0; gi < grid.length; gi++) {
-      var gv = grid[gi];
-      line(g, mx(gv), my(0), mx(gv), my(1), withAlpha(P.outline, 0.28), 1);
-      line(g, mx(0), my(gv), mx(1), my(gv), withAlpha(P.outline, 0.28), 1);
-    }
-    text(g, "0", mx(0) + 2, my(0) - 12, 8.5, P.faint);
-    text(g, "1", mx(1) - 8, my(1) + 2, 8.5, P.faint);
 
     var segs = curveSegmentsFor(S.anchors);
     var glow = g.newPen(g.PenType.SOLID_COLOR, withAlpha(P.primary, 0.12), 6);
@@ -1652,10 +1831,14 @@
   function iconHint() {
     var h = hoverId;
     if (!h) return "";
+    if (isMulti() && (h === "mode:in" || h === "mode:out" || h === "mode:inout")) {
+      return TR("多点模式写入两侧，入 / 出 / 双侧只在单段模式生效",
+        "Multi-point writes both sides; In/Out/Both apply to single-segment mode");
+    }
     if (h === "icon:lang") return TR("语言", "Language");
     if (h === "icon:import") return isMulti() ? T("导入选中关键帧为多点曲线") : T("导入选中关键帧的缓动曲线");
     if (h === "icon:overshoot") return T(S.allowOvershoot ? "允许超出边界（链条断开）" : "限制在 0–1 内（链条连接）");
-    if (h === "icon:realtime") return T(isMulti() ? "实时写入（多点只预览）" : (S.realtime ? "实时写入：开" : "实时写入：关"));
+    if (h === "icon:realtime") return T(S.realtime ? "实时写入：开" : "实时写入：关");
     if (h === "icon:add") return T("添加关键帧点");
     if (h === "icon:del") return T("删除当前关键帧点");
     if (h === "icon:smooth") return T((S.anchors[S.selectedAnchor] && S.anchors[S.selectedAnchor].smooth !== false) ? "点击改成折断" : "点击改成平滑");
@@ -1667,30 +1850,39 @@
   }
   function drawTool(g, c) {
     var hov = hoverId === c.id, press = pressedId === c.id;
-    var fill = c.active ? P.primaryContainer : P.low;
-    if (press) fill = P.highest;
-    else if (hov) fill = P.high;
-    fillRound(g, c.x, c.y, c.w, c.h, c.type === "mode" ? 9 : 10, fill);
-    var col = c.active ? P.onPrimaryContainer : (c.icon === "gear" || c.icon === "overshoot") && c.on ? P.primary : (c.type === "mode" ? P.dim : P.text);
+    // No resting chip: the toolbar is icon-only until the pointer reaches a control. Hover,
+    // press and the selected mode paint the background; disabled modes (multi-point) never do.
+    var rr = c.type === "mode" ? 9 : 10;
+    if (!c.disabled) {
+      if (press) fillRound(g, c.x, c.y, c.w, c.h, rr, P.highest);
+      else if (hov) fillRound(g, c.x, c.y, c.w, c.h, rr, c.active ? P.primaryContainer : P.highest);
+      else if (c.active) fillRound(g, c.x, c.y, c.w, c.h, rr, P.primaryContainer);
+    }
+    var col = c.disabled ? withAlpha(P.faint, 0.55)
+      : c.active ? P.onPrimaryContainer
+        : (c.icon === "gear" || c.icon === "overshoot") && c.on ? P.primary
+          : (c.type === "mode" ? P.dim : P.text);
     drawIcon(g, c.icon, c.x + c.w / 2, c.y + c.h / 2, c.type === "mode" ? 10 : 11, col, {
       filled: c.icon === "gear" ? !!c.on : !!c.active,
       on: !!c.on,
-      angle: ((new Date().getTime() / 1000) * 2.2) % (Math.PI * 2)
+      // Only the gear reads the angle; building a Date for every icon every frame was wasted.
+      angle: c.icon === "gear" ? ((nowMs() / 1000) * 2.2) % (Math.PI * 2) : 0
     });
   }
   function drawApply(g, c) {
     var hov = hoverId === c.id, press = pressedId === c.id;
     var r = 10;
     var blue = press ? P.primary : P.primary;
-    // Outline button when idle; full blue fill and a black check while the mouse is pressed.
+    // The outline stays visible at rest; hover adds a soft fill, press fills the whole button.
     if (press) {
       fillRound(g, c.x, c.y, c.w, c.h, r, P.primary);
     } else {
-      fillRound(g, c.x, c.y, c.w, c.h, r, withAlpha(P.primary, hov ? 0.14 : 0.04));
+      if (hov) fillRound(g, c.x, c.y, c.w, c.h, r, withAlpha(P.primary, 0.2));
       strokeRound(g, c.x + 0.8, c.y + 0.8, c.w - 1.6, c.h - 1.6, r - 0.8, blue, 1.8);
     }
-    var cx = c.x + c.w / 2, cy = c.y + c.h / 2;
-    var ss = Math.min(c.w / 40, c.h / 32);
+    var cx = c.iconX !== undefined ? c.iconX : c.x + c.w / 2, cy = c.y + c.h / 2;
+    // The check keeps its size no matter how wide the button is.
+    var ss = Math.min(1, c.h / 32);
     var checkCol = press ? P.bg : P.primary;
     line(g, cx - 7 * ss, cy + 1 * ss, cx - 1 * ss, cy + 7 * ss, checkCol, Math.max(2, 2.4 * ss));
     line(g, cx - 1 * ss, cy + 7 * ss, cx + 9 * ss, cy - 6 * ss, checkCol, Math.max(2, 2.4 * ss));
@@ -1700,7 +1892,7 @@
     var fill = c.accent ? P.primaryContainer : P.high;
     if (press) fill = P.highest;
     else if (hov) fill = c.accent ? mixColor(P.primaryContainer, P.onPrimaryContainer, 0.08) : P.highest;
-    fillRound(g, c.x, c.y, c.w, c.h, c.h / 2, fill);
+    if (press || hov) fillRound(g, c.x, c.y, c.w, c.h, c.h / 2, fill);
     if (c.icon) drawIcon(g, c.icon, c.x + c.w / 2, c.y + c.h / 2, Math.max(8, c.h / 2 - 3), c.accent ? P.onPrimaryContainer : P.text, {});
     else textBox(g, c.label, c.x + 8, c.y, c.w - 16, c.h, 10.5, c.accent ? P.onPrimaryContainer : P.text, "center", "REGULAR", c.w - 16);
   }
@@ -1828,8 +2020,9 @@
     var pen = g.newPen(g.PenType.SOLID_COLOR, color, 1.4);
     for (si = 0; si < segs.length; si++) {
       g.newPath();
-      for (tt = 0; tt <= 24; tt++) {
-        pt = cubicPointAt(segs[si], tt / 24);
+      // 12 samples across a ~30px thumbnail: the old 24 points were invisible in the result.
+      for (tt = 0; tt <= 12; tt++) {
+        pt = cubicPointAt(segs[si], tt / 12);
         var px = x + (pt[0] - minX) / vw * w;
         var py = y + h - (pt[1] - minY) / vh * h;
         if (tt === 0) g.moveTo(px, py); else g.lineTo(px, py);
@@ -1849,22 +2042,20 @@
     }
     for (i = 0; i < pl.cells.length; i++) {
       var cell = pl.cells[i], pr = cell.preset;
-      // Only paint cells that intersect the list viewport. The mask still handles the 1px
-      // partial edge, but off-screen rows no longer cost a rounded rect, mini curve and text.
-      if (cell.rect.y > listBottom || cell.rect.y + cell.rect.h < list.y) continue;
+      // Only fully visible cells: the list is no longer masked with a background (the panel shows
+      // EffectCraft's own colour), so a partially scrolled row would spill outside the viewport.
+      if (cell.rect.y < list.y || cell.rect.y + cell.rect.h > listBottom) continue;
       var isSel = S.selectedPreset && S.selectedPreset.groupId === cell.group.id && S.selectedPreset.presetId === pr.id;
       var isHover = hoverId === "preset:" + cell.group.id + ":" + pr.id;
       var sq = Math.min(42, Math.max(26, cell.rect.w - 14));
       var sx = cell.rect.x + (cell.rect.w - sq) / 2;
       var sy = cell.rect.y + 2;
-      fillRound(g, sx, sy, sq, sq, 10, isSel ? P.primaryContainer : isHover ? P.highest : P.low);
+      if (isSel || isHover) fillRound(g, sx, sy, sq, sq, 10, isSel ? P.primaryContainer : P.highest);
       miniCurve(g, pr.anchors, sx + 5, sy + 5, sq - 10, sq - 10, isSel ? P.onPrimaryContainer : P.primary);
       textBox(g, presetDisplayName(pr), cell.rect.x, sy + sq + 2, cell.rect.w, 15, 9,
         isSel ? P.onPrimaryContainer : P.text, "center", "REGULAR", cell.rect.w);
     }
-    // 2) Mask the list viewport, then repaint the fixed header and group chips.
-    fillRect(g, r.x, r.y, r.w, Math.max(0, list.y - r.y), P.bg);
-    fillRect(g, r.x, listBottom, r.w, Math.max(0, r.y + r.h - listBottom), P.bg);
+    // 2) Fixed header and group chips (the panel background itself stays unpainted).
     textBox(g, T("预设库"), r.x + 2, r.y, 70, 26, 10, P.dim, "left", "REGULAR");
     drawPill(g, pl.save);
     drawPill(g, pl.newGroup);
@@ -1873,7 +2064,7 @@
       var ch = pl.chips[i];
       var sel = ch.group.id === S.selectedGroupId;
       var hov = hoverId === "group:" + ch.group.id;
-      fillRound(g, ch.x, ch.y, ch.w, ch.h, ch.h / 2, sel ? P.primaryContainer : hov ? P.highest : P.high);
+      if (sel || hov) fillRound(g, ch.x, ch.y, ch.w, ch.h, ch.h / 2, sel ? P.primaryContainer : P.highest);
       textBox(g, groupDisplayName(ch.group), ch.x + 7, ch.y, ch.w - 14, ch.h, 10,
         sel ? P.onPrimaryContainer : P.text, "center", "REGULAR", ch.w - 14);
     }
@@ -1953,7 +2144,8 @@
     S.anchors = cloneAnchors(preset.anchors);
     S.selectedAnchor = 0;
     S.selectedPreset = { groupId: group.id, presetId: preset.id };
-    if (S.anchors.length > 2) ensureMultiHandles(S.anchors);
+    // Detect overshoot before completing handles: ensureMultiHandles() clamps y to 0..1 when the
+    // overshoot switch is off, which used to flatten imported bounce presets.
     if (!S.allowOvershoot) {
       var outside = false;
       for (var i = 0; i < S.anchors.length; i++) {
@@ -1963,8 +2155,9 @@
         if (a.hOut && (a.hOut.y < 0 || a.hOut.y > 1)) outside = true;
       }
       if (outside) S.allowOvershoot = true;
-      else clampAllAnchors();
     }
+    if (S.anchors.length > 2) ensureMultiHandles(S.anchors);
+    if (!S.allowOvershoot) clampAllAnchors();
     saveState();
     if (applyNow || (S.realtime && !isMulti())) {
       applyCurrent(false);
@@ -2000,7 +2193,6 @@
     var gname = cleanName(res.group), pname = cleanName(res.name);
     for (i = 0; i < names.length; i++) if (names[i] === res.group) { gname = values[i]; break; }
     if (!pname) { st("预设名称不能为空", "Preset name cannot be empty"); return; }
-    if (builtinGroupNamed(gname)) { status(TR("“" + gname + "”是内置组名，请换一个组名", "“" + gname + "” is a built-in group name; choose another")); return; }
     var grp = null;
     for (i = 0; i < S.userGroups.length; i++) if (S.userGroups[i].name.toLowerCase() === gname.toLowerCase()) grp = S.userGroups[i];
     if (!grp) {
@@ -2033,6 +2225,17 @@
     }
     preset.name = name;
     status(TR("预设已重命名为“" + name + "”", "Preset renamed to “" + name + "”"));
+    saveState(); redraw();
+  }
+  function updatePresetFromCurve(group, preset) {
+    if (isBuiltinGroup(group)) { st("内置预设只读", "Built-in presets are read-only"); return; }
+    if (!confirmDialog(T("用当前曲线更新该预设"),
+      TR("用编辑器里的当前曲线覆盖预设“" + presetDisplayName(preset) + "”吗？",
+        "Replace preset “" + presetDisplayName(preset) + "” with the current curve?"))) return;
+    preset.anchors = cloneAnchors(S.anchors);
+    preset.multi = S.anchors.length > 2;
+    S.selectedPreset = { groupId: group.id, presetId: preset.id };
+    status(TR("已更新预设“" + presetDisplayName(preset) + "”", "Updated preset “" + presetDisplayName(preset) + "”"));
     saveState(); redraw();
   }
   function deletePreset(group, preset) {
@@ -2078,7 +2281,6 @@
     if (res === null) return;
     var name = cleanName(res);
     if (!name) { st("组名称不能为空", "Group name cannot be empty"); return; }
-    if (builtinGroupNamed(name)) { status(TR("“" + name + "”是内置组名", "“" + name + "” is a built-in group name")); return; }
     for (var i = 0; i < S.userGroups.length; i++) if (S.userGroups[i].name.toLowerCase() === name.toLowerCase()) {
       st("已有同名预设组", "A group with that name already exists"); return;
     }
@@ -2095,7 +2297,6 @@
     if (res === null) return;
     var name = cleanName(res);
     if (!name) { st("组名称不能为空", "Group name cannot be empty"); return; }
-    if (builtinGroupNamed(name)) { status(TR("“" + name + "”是内置组名", "“" + name + "” is a built-in group name")); return; }
     for (var i = 0; i < S.userGroups.length; i++) {
       if (S.userGroups[i] !== group && S.userGroups[i].name.toLowerCase() === name.toLowerCase()) {
         st("已有同名预设组", "A group with that name already exists"); return;
@@ -2324,7 +2525,7 @@
         hOut0: anchor0.hOut ? { x: anchor0.hOut.x, y: anchor0.hOut.y } : null,
         moved: false, t0: nowMs()
       };
-      liveMode = S.realtime && !isMulti();
+      liveMode = S.realtime;
       redraw();
       return;
     }
@@ -2521,11 +2722,16 @@
         return;
       }
       if (drag.kind === "handle" || drag.kind === "anchor") {
+        // A live multi-point drag rebuilds keys, so the last (possibly throttled) pointer position
+        // is written before the undo step closes. This runs inside the drag's undo group.
+        if (liveMode && drag.moved && isMulti()) applyLive(true);
         endLiveGroup();
         liveMode = false;
         if (drag.moved) {
-          if (isMulti()) st("多点曲线已更新；点 √ 写入时间线关键帧", "Multi-point curve updated; click √ to write timeline keys");
-          else if (S.realtime) st("已实时写入缓动", "Easing written live");
+          if (isMulti()) {
+            if (S.realtime) st("已实时写入多点关键帧", "Multi-point keyframes written live");
+            else st("多点曲线已更新；点 √ 写入时间线关键帧", "Multi-point curve updated; click √ to write timeline keys");
+          } else if (S.realtime) st("已实时写入缓动", "Easing written live");
           else st("预览已更新，点 √ 写入关键帧", "Preview updated; click √ to write keyframes");
           saveState();
         }
@@ -2574,11 +2780,16 @@
     }
     if (id === "icon:realtime") {
       S.realtime = !S.realtime;
-      if (isMulti()) st(S.realtime ? "实时写入：多点模式只预览；点 √ 写入关键帧" : "实时写入已关闭",
-        S.realtime ? "Live write: multi-point preview only; click √ to write keys" : "Live write is off");
-      else st(S.realtime ? "实时写入已开启：拖动控制点会立即写入关键帧" : "实时写入已关闭：调整只预览",
-        S.realtime ? "Live write on: dragging controls writes keyframes immediately" : "Live write off: adjustments preview only");
+      if (isMulti()) {
+        st(S.realtime ? "实时写入已开启：拖动点或操纵杆会立即重建时间线关键帧" : "实时写入已关闭",
+          S.realtime ? "Live write on: dragging points or levers rebuilds the timeline keys" : "Live write is off");
+      } else {
+        st(S.realtime ? "实时写入已开启：拖动控制点会立即写入关键帧" : "实时写入已关闭：调整只预览",
+          S.realtime ? "Live write on: dragging controls writes keyframes immediately" : "Live write off: adjustments preview only");
+      }
       saveState();
+      // Single mode only applies the already-loaded curve here; multi-point apply rebuilds
+      // keyframes, which should not happen just because the switch was turned on.
       if (S.realtime && !isMulti()) applyCurrent(false);
       redraw(); return;
     }
@@ -2587,9 +2798,16 @@
     if (id === "icon:del") { deleteAnchor(); return; }
     if (id === "icon:smooth") { toggleSmooth(); return; }
     if (id === "button:apply") { applyCurrent(false); return; }
-    if (id === "mode:in") { S.applyMode = "in"; saveState(); redraw(); return; }
-    if (id === "mode:out") { S.applyMode = "out"; saveState(); redraw(); return; }
-    if (id === "mode:inout") { S.applyMode = "inout"; saveState(); redraw(); return; }
+    if (id === "mode:in" || id === "mode:out" || id === "mode:inout") {
+      if (isMulti()) {
+        st("多点模式按点写入两侧，入 / 出 / 双侧只在单段模式生效",
+          "Multi-point writes both sides; In/Out/Both apply to single-segment mode");
+        redraw();
+        return;
+      }
+      S.applyMode = id === "mode:in" ? "in" : id === "mode:out" ? "out" : "inout";
+      saveState(); redraw(); return;
+    }
     if (id === "button:savePreset") { saveCurrentAsPreset(); return; }
     if (id === "button:newGroup") { createGroup(); return; }
     if (id === "button:groups" || id === "button:moreGroups") { S.showAllGroups = !S.showAllGroups; saveState(); redraw(); return; }
@@ -2601,42 +2819,31 @@
     if (menu) { closeMenu(); return; }
     if (!hit) return;
     if (hit.kind === "preset") {
-      if (isBuiltinGroup(hit.group)) {
-        menu = {
-          x: x, y: y, w: 200, items: [
-            { label: T("加载到编辑器"), action: function () { loadPreset(hit.group, hit.preset, false); } },
-            { label: T("加载并应用"), action: function () { loadPreset(hit.group, hit.preset, true); } },
-            { header: true, label: T("内置预设只读") },
-            { label: T("复制到我的预设"), action: function () { duplicateToUserGroup(hit.preset); } }
-          ]
-        };
-      } else {
-        menu = {
-          x: x, y: y, w: 190, items: [
-            { label: T("加载到编辑器"), action: function () { loadPreset(hit.group, hit.preset, false); } },
-            { label: T("加载并应用"), action: function () { loadPreset(hit.group, hit.preset, true); } },
-            { header: true, label: "" },
-            { label: T("重命名…"), action: function () { renamePreset(hit.group, hit.preset); } },
-            { label: T("复制"), action: function () { duplicatePreset(hit.group, hit.preset); } },
-            { label: T("删除"), danger: true, action: function () { deletePreset(hit.group, hit.preset); } }
-          ]
-        };
-      }
+      // Every group is editable now (the built-ins are migrated into user groups), so one menu
+      // covers loading, updating from the current curve, renaming, duplicating and deleting.
+      menu = {
+        x: x, y: y, w: 214, items: [
+          { label: T("加载到编辑器"), action: function () { loadPreset(hit.group, hit.preset, false); } },
+          { label: T("加载并应用"), action: function () { loadPreset(hit.group, hit.preset, true); } },
+          { header: true, label: "" },
+          { label: T("用当前曲线更新该预设"), action: function () { updatePresetFromCurve(hit.group, hit.preset); } },
+          { label: T("重命名…"), action: function () { renamePreset(hit.group, hit.preset); } },
+          { label: T("复制"), action: function () { duplicatePreset(hit.group, hit.preset); } },
+          { label: T("删除"), danger: true, action: function () { deletePreset(hit.group, hit.preset); } }
+        ]
+      };
       redraw(); return;
     }
     if (hit.kind === "groupChip") {
-      var builtin = isBuiltinGroup(hit.group);
       menu = {
         x: x, y: y, w: 190, items: [
           { label: T("显示这个组"), action: function () { S.selectedGroupId = hit.group.id; S.scroll = 0; saveState(); } },
           { header: true, label: "" },
-          { label: T("新建组…"), action: createGroup }
+          { label: T("新建组…"), action: createGroup },
+          { label: T("重命名组…"), action: function () { renameGroup(hit.group); } },
+          { label: T("删除组"), danger: true, action: function () { deleteGroup(hit.group); } }
         ]
       };
-      if (!builtin) {
-        menu.items.push({ label: T("重命名组…"), action: function () { renameGroup(hit.group); } });
-        menu.items.push({ label: T("删除组"), danger: true, action: function () { deleteGroup(hit.group); } });
-      }
       redraw(); return;
     }
     if (pointInRect(x, y, L.preset)) {
@@ -2753,14 +2960,8 @@
   }
 
   // ---------------------------------------------------------------- window
-  function drawBackground(g, W, H) {
-    // A solid fill is the cheapest possible background. The old large alpha-blended ellipse
-    // glow was repainted over the whole viewport on every hover/drag and was a measurable
-    // cost on this non-MSAA custom canvas.
-    g.newPath();
-    g.rectPath(0, 0, W, H);
-    g.fillPath(g.newBrush(g.BrushType.SOLID_COLOR, P.bg));
-  }
+  // The script no longer paints a full-canvas background: the host's panel colour shows through,
+  // so the panel matches EffectCraft's interface (including its theme and brightness).
   function drawResize(g) {
     if (embedded) return;
     var W = L.W, H = L.H;
@@ -2784,7 +2985,6 @@
   function onDraw() {
     var g = this.graphics, W = this.size.width, H = this.size.height;
     L = buildLayout(g, W, H);
-    drawBackground(g, W, H);
     drawEditor(g, L);
     drawFunction(g, L);
     drawPresets(g, L);
