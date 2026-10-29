@@ -516,6 +516,52 @@ E2E 坐标按新几何 `plot=(18,18,304,171)` 复核）。
 - `activate()` 里三个 mode 分支合并处理：多点模式直接返回，单段模式照常切换 `S.applyMode`。
 - `iconHint()` 在多点模式悬停这三个按钮时也给出同样的说明。
 
+### 8.9 1.0.11：重绘触发从 notify 换成 layout（0.18.0 实测，2026-10-29）
+
+- 问题：`notify("onDraw")` 在 0.17/0.18 里会跑**两遍** onDraw —— notify 自己调一次，宿主重绘整窗
+  再调一次。用两画布 probe 实测：没有任何 notify 的普通点击 → 两个画布各 +1（整窗重绘会重跑
+  所有 onDraw）；对 A notify → A +2、B +1。
+- 方案：`redraw()` 改用 `(win || canvas.window).layout.layout(true)` 触发重绘，layout 只触发一次
+  整窗重绘。实测 40 次悬停的 onDraw 从 **80 次降到 40 次**；onDraw 平均约 4ms，等于每帧脚本耗时
+  8ms → 4ms。画面（悬停底、状态栏、曲线拖动）验证正常；没有 `layout` 对象的宿主回退到 notify。
+- 顺带确认：`ScriptUI.newImage(120,80)` 报 TypeError，脚本不能创建图像缓存；没有脏矩形/局部
+  重绘 API，拆多个自定义画布也不会减少总工作量（每帧所有 onDraw 都会跑一遍）。
+
+### 8.10 1.0.12：实时写入由编辑器接管、节流调整、保存默认组（0.18.0 实测，2026-10-29）
+
+- **多点删点残留**：实时写入时 4 点删成 3 点时，时间线上被删掉的键会留下（`applyMultiCurve`
+  只删“选中键”，范围内未选中的键不动）。1.0.12 起实时写入把首尾范围视为编辑器所有：
+  范围内不属于曲线点的键（不论是否选中）全部删除；4→3 删点后立即 `applyMultiCurve(true)`。
+- **3 点→2 点回到单段**：原来只切模式，单段实时写入只写缓动、不删键，中间键留在时间线。
+  现在 `deleteAnchor` 在实时写入开启时调用 `pruneRangeMiddleKeys()`（删范围内除首尾外的键并重新
+  选中首尾），再 `applyCurrent(true)` 写入恢复后的缓动。实时写入关闭时行为不变（只改预览）。
+- **节流**：多点实时写入 40ms → 80ms（时间线少重建一半）；重绘 24ms → 16ms（约 60fps）；
+  拖动期间曲线采样 32 → 20（`drag.kind` 为 handle/anchor 时），松手后最终帧用 32。
+- **保存预设默认组**：`saveCurrentAsPreset()` 原来固定传 `groups[0]`，现在按 `S.selectedGroupId`
+  找到当前组传给 `presetSaveDialog()`，右键保存时下拉框默认就是当前组。
+
+### 8.11 1.0.13：设置菜单（语言 + 实时写入模式）（0.18.0 实测，2026-10-30）
+
+- 下排第一个按钮由地球（`icon:lang`）换成三横线（`icon:settings`，新增 `hamburger` 图标）。
+  `activate` 打开 `openSettingsMenu()`，复用已有的 `menu` 覆盖层：
+  - 语言：English / 中文（带 ✓ 的当前项，`setLanguage()` 不变）；
+  - 实时写入模式：「停止拖动后写入」开关（✓ = 开）。
+- 新增状态 `S.writeOnRelease`（默认 false，存进 `app.settings` 的 `writeOnRelease`）。
+  打开时 `applyLive()` 直接返回；`canvasMouseUp` 的 handle/anchor 分支在 `endLiveGroup()` 后
+  写一次（多点 `applyMultiCurve()`、单段 `applyCurrent(false)`），状态栏提示“已写入…（停止拖动后写入）”。
+- 多点范围清理（1.0.12 的 `if (live)`）改成 `if (S.realtime)`，所以停止后写入模式同样由编辑器
+  决定首尾之间的键。
+
+### 8.12 1.1.0：英文翻译完善（2026-10-30）
+
+- 补全 `EN` 映射缺失的三个键：`设置` → "Settings"、`实时写入模式` → "Live write mode"、
+  `停止拖动后写入` → "Write on release"（1.0.13 的英文界面下这三条会显示中文）。
+- 润色：多点模式提示补 "only"、单段模式统一写 "single-segment mode"、平滑/折断提示改成
+  "Click to make the levers independent" / "Click to align the levers"、实时写入状态去掉
+  "immediately"、缓动应用结果从 "ease side" 改成 "easing side"、添加点提示改成 "with levers"。
+- 删除已不再使用且内容过时的 "Live write (multi-point previews only)" 条目。
+- 版本 1.1.0 作为 1.0.10 之后的大版本发布，汇总 1.0.11–1.0.13。
+
 ## 9. 参考资料
 
 - 官方 Ease Presets 源码：`examples/Ease Presets.jsx`

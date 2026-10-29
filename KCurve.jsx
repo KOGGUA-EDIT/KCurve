@@ -1,5 +1,5 @@
 /*
- * KCurve 1.0.10 — Flow-style easing curve editor for EffectCraft.
+ * KCurve 1.1.0 — Flow-style easing curve editor for EffectCraft.
  *
  * Run it from File ▸ Scripts ▸ Run Script File… (a floating, resizable palette), or install it
  * with File ▸ Scripts ▸ Install ScriptUI Panel… (the docked panel opens the floating editor).
@@ -61,7 +61,7 @@
 
 (function (thisObj) {
   // ---------------------------------------------------------------- constants
-  var KCURVE_VERSION = "1.0.10";
+  var KCURVE_VERSION = "1.1.0";
   var SETTINGS_SECTION = "KCurve";
   var SETTINGS_KEY = "state";
   var STATE_VERSION = 5;
@@ -517,7 +517,7 @@
     a.splice(i + 1, 0, { x: sp2.mid.x, y: sp2.mid.y, hIn: sp2.left.p2, hOut: sp2.right.p1, smooth: false });
     S.selectedAnchor = i + 1;
     clampAnchorHandles(i); clampAnchorHandles(i + 1); clampAnchorHandles(i + 2);
-    status(TR("已添加关键帧点和操纵杆（共 " + a.length + " 个）", "Added a keyframe point and levers (" + a.length + " total)"));
+    status(TR("已添加关键帧点和操纵杆（共 " + a.length + " 个）", "Added a keyframe point with levers (" + a.length + " total)"));
     saveState(); redraw();
   }
   function deleteAnchor() {
@@ -527,6 +527,16 @@
       a.splice(i, 1);
       S.selectedAnchor = Math.max(1, Math.min(a.length - 1, i));
       clampAllAnchors();
+      // 1.0.12: live write keeps the timeline in step when a point is deleted, instead of waiting
+      // for the next drag. The write is its own undo step unless a drag already opened one.
+      if (S.realtime) {
+        var wasLive = liveGroupOpen, opened = false;
+        try {
+          if (!wasLive) { app.beginUndoGroup("KCurve: Delete Keyframe"); opened = true; }
+          applyMultiCurve(true);
+        } catch (e) {}
+        if (opened) { try { app.endUndoGroup(); } catch (e2) {} liveGroupOpen = false; }
+      }
       status(TR("已删除关键帧点（剩余 " + a.length + " 个）", "Deleted keyframe point (" + a.length + " left)"));
       saveState(); redraw();
       return;
@@ -544,13 +554,22 @@
     ];
     clampAllAnchors();
     S.selectedAnchor = 0;
+    // 1.0.12: back in single-segment mode the two endpoints are the whole curve, so with live
+    // write on the middle keyframes are removed and the recovered easing is written at once.
+    if (S.realtime) {
+      var opened2 = false;
+      try { app.beginUndoGroup("KCurve: Delete Keyframe"); opened2 = true; } catch (e) {}
+      try { pruneRangeMiddleKeys(); } catch (e) {}
+      try { applyCurrent(true); } catch (e) {}
+      if (opened2) { try { app.endUndoGroup(); } catch (e) {} }
+    }
     st("已回到单段缓动模式", "Back to single-segment easing mode");
     saveState(); redraw();
   }
   function toggleSmooth() {
-    if (!isMulti()) { st("平滑/折断只在多点模式使用；单段模式请拖拉杆", "Smooth/Break is only for multi-point mode; drag the levers in single mode"); redraw(); return; }
+    if (!isMulti()) { st("平滑/折断只在多点模式使用；单段模式请拖拉杆", "Smooth/Break is only for multi-point mode; drag the levers in single-segment mode"); redraw(); return; }
     var a = S.anchors, i = S.selectedAnchor | 0;
-    if (i <= 0 || i >= a.length - 1) { st("首尾点没有相邻段，不能设置平滑/折断", "The first/last point has no neighboring segment"); redraw(); return; }
+    if (i <= 0 || i >= a.length - 1) { st("首尾点没有相邻段，不能设置平滑/折断", "The first/last point has no adjacent segment to smooth or break"); redraw(); return; }
     var p = a[i];
     p.smooth = p.smooth === false;
     if (p.smooth) {
@@ -818,6 +837,34 @@
     if (!keys.length) return false;
     try { app.run("keys.select", { keys: keys, timeBase: "comp" }); return true; } catch (e) { return false; }
   }
+  // 1.0.12: with live write on, the keys between the first and last selected key belong to the
+  // editor. Going from a multi-point curve back to a single segment used to leave the middle
+  // keyframe behind; this drops every key strictly inside the range and keeps the two endpoints
+  // selected so the next live write still has a range.
+  function pruneRangeMiddleKeys() {
+    var keyed = selectedKeyed(), comp = app.project.activeItem, fd, ranges = [], i, k;
+    if (!keyed.length) return 0;
+    fd = comp && comp.frameDuration ? comp.frameDuration : 1 / 30;
+    for (i = 0; i < keyed.length; i++) {
+      var p = keyed[i].prop, keys = keyed[i].keys;
+      if (keys.length < 2) continue;
+      var t0 = p.keyTime(keys[0]), t1 = p.keyTime(keys[keys.length - 1]);
+      if (!(t1 > t0)) continue;
+      ranges.push({ p: p, t0: t0, t1: t1 });
+      for (k = p.numKeys; k >= 1; k--) {
+        var kt = p.keyTime(k);
+        if (kt > t0 + fd * 0.51 && kt < t1 - fd * 0.51) { try { p.removeKey(k); } catch (e) {} }
+      }
+    }
+    var entries = [];
+    for (i = 0; i < ranges.length; i++) {
+      var idx0 = findKeyIndexAt(ranges[i].p, ranges[i].t0, fd * 0.51);
+      var idx1 = findKeyIndexAt(ranges[i].p, ranges[i].t1, fd * 0.51);
+      if (idx0 > 0 && idx1 > idx0) entries.push({ p: ranges[i].p, idxs: [idx0, idx1] });
+    }
+    if (entries.length) { try { selectKeyIndices(entries); } catch (e) {} }
+    return ranges.length;
+  }
   // Multi-point apply: the points are keyframes between the first and last SELECTED keys.
   // Every point gets a key at a proportionally spaced time; missing keys are added, existing keys
   // updated. The Hermite derivatives then become the Bezier eases of each segment.
@@ -897,6 +944,20 @@
           if (typeof p.removeKey === "function") {
             for (k = keys.length - 1; k >= 0; k--) {
               try { p.removeKey(keys[k]); removed++; } catch (e) {}
+            }
+          }
+          // 1.0.12/1.0.13: while realtime write is on (continuous or on release) the editor owns
+          // the whole first..last range: keys that are no longer one of the curve points go too,
+          // even when they were not selected — a deleted point used to leave its keyframe behind.
+          if (S.realtime) {
+            for (k = p.numKeys; k >= 1; k--) {
+              var rkt = p.keyTime(k);
+              if (rkt <= t0 + fd * 0.51 || rkt >= t1 - fd * 0.51) continue;
+              var isPoint = false;
+              for (var q = 0; q < times.length; q++) {
+                if (Math.abs(rkt - times[q]) <= tol) { isPoint = true; break; }
+              }
+              if (!isPoint) { try { p.removeKey(k); removed++; } catch (e) {} }
             }
           }
           for (j = 0; j < times.length; j++) {
@@ -980,17 +1041,20 @@
       if (built.skipped) extra.push(TR("跳过 Hold " + built.skipped, "skipped Hold " + built.skipped));
       if (built.roving) extra.push(TR("跳过 Roving " + built.roving, "skipped Roving " + built.roving));
       status(TR("已应用 " + n + " 个缓动侧" + (extra.length ? "（" + extra.join("，") + "）" : ""),
-        "Applied " + n + " ease side" + (n === 1 ? "" : "s") + (extra.length ? " (" + extra.join(", ") + ")" : "")));
+        "Applied " + n + " easing side" + (n === 1 ? "" : "s") + (extra.length ? " (" + extra.join(", ") + ")" : "")));
     }
     redraw();
     return n;
   }
   function applyLive(force) {
+    // 1.0.13: "write on release" mode keeps the drag as a preview only; the timeline is written
+    // once in canvasMouseUp when the pointer is released.
+    if (S.writeOnRelease) return;
     if (isMulti()) {
       // Multi-point writes real keyframes (not just eases), so throttle the writes to roughly the
       // canvas repaint cadence; mouseup forces a final exact write while the undo group is open.
       var t = nowMs();
-      if (!force && t - lastLiveMs < 40) return;
+      if (!force && t - lastLiveMs < 80) return;
       lastLiveMs = t;
       try { applyMultiCurve(true); } catch (e) {}
       return;
@@ -1017,6 +1081,7 @@
       anchors: defaultAnchors(),
       allowOvershoot: false,
       realtime: false,
+      writeOnRelease: false,
       applyMode: "inout",
       showAllGroups: false,
       collapsed: {},
@@ -1056,18 +1121,20 @@
     "组名称": "Group name",
     "语言": "Language",
     "中文": "中文",
-    "跟随软件": "Follow App",
+    "设置": "Settings",
+    "实时写入模式": "Live write mode",
+    "停止拖动后写入": "Write on release",
+    "跟随软件": "Follow App Language",
     "导入选中关键帧为多点曲线": "Import selected keys as a multi-point curve",
     "导入选中关键帧的缓动曲线": "Import selected keys as an easing curve",
     "允许超出边界（链条断开）": "Allow overshoot (chain broken)",
     "限制在 0–1 内（链条连接）": "Keep within 0–1 (chain linked)",
-    "实时写入（多点只预览）": "Live write (multi-point previews only)",
     "实时写入：开": "Live write: On",
     "实时写入：关": "Live write: Off",
     "添加关键帧点": "Add a keyframe point",
     "删除当前关键帧点": "Delete the current keyframe point",
-    "点击改成折断": "Click to break the levers",
-    "点击改成平滑": "Click to smooth the levers",
+    "点击改成折断": "Click to make the levers independent",
+    "点击改成平滑": "Click to align the levers",
     "只写入入侧": "Write the In side only",
     "只写入出侧": "Write the Out side only",
     "写入入侧和出侧": "Write both In and Out",
@@ -1143,6 +1210,7 @@
           if (a) st.anchors = a;
           if (o.allowOvershoot === true) st.allowOvershoot = true;
           if (o.realtime === true) st.realtime = true;
+          if (o.writeOnRelease === true) st.writeOnRelease = true;
           if (o.applyMode === "in" || o.applyMode === "out" || o.applyMode === "inout") st.applyMode = o.applyMode;
           if (o.showAllGroups === true) st.showAllGroups = true;
           if (o.collapsed && typeof o.collapsed === "object") st.collapsed = o.collapsed;
@@ -1299,6 +1367,7 @@
         anchors: S.anchors,
         allowOvershoot: !!S.allowOvershoot,
         realtime: !!S.realtime,
+        writeOnRelease: !!S.writeOnRelease,
         applyMode: S.applyMode,
         showAllGroups: !!S.showAllGroups,
         collapsed: S.collapsed,
@@ -1386,9 +1455,14 @@
     var t = nowMs();
     // A full custom-canvas repaint is expensive. Mouse-move previews can skip a frame; actions
     // and mouseup pass force=true so the final state is always painted.
-    if (!force && t - lastPaintMs < 24) return;
+    if (!force && t - lastPaintMs < 16) return;
     lastPaintMs = t;
-    try { canvas.notify("onDraw"); } catch (e) {}
+    // notify("onDraw") runs the handler for the notify and then again for the host repaint, so a
+    // single redraw costs two draw passes. Forcing the layout triggers the repaint and runs the
+    // handler once (1.0.11, measured: 40 hovers -> 40 draws instead of 80). Keep notify as a
+    // fallback for hosts without a layout object.
+    try { (win || canvas.window).layout.layout(true); }
+    catch (e) { try { canvas.notify("onDraw"); } catch (e2) {} }
   }
   function stopSpinTask() {
     if (spinTask === null) return;
@@ -1587,7 +1661,7 @@
     }
     var apply = { id: "button:apply", type: "apply", icon: "check", w: 36, h: 30 };
     var lower = [
-      { id: "icon:lang", type: "tool", icon: "lang" },
+      { id: "icon:settings", type: "tool", icon: "hamburger" },
       { id: "icon:realtime", type: "tool", icon: "gear", on: !!S.realtime }
     ];
     // The write-side selector is always visible. In multi-point mode it is dimmed: applying a
@@ -1740,12 +1814,13 @@
     return [{ x0: 0, y0: 0, x1: s.x1, y1: s.y1, x2: s.x2, y2: s.y2, x3: 1, y3: 1 }];
   }
   function strokeCurveSegments(g, segs, mx, my, pen) {
+    // While a handle/anchor is dragged the curve is rebuilt on every repaint; 20 samples are still
+    // smooth at this size and remove about a third of the path points (the final paint uses 32).
+    var n = (drag && (drag.kind === "handle" || drag.kind === "anchor")) ? 20 : 32;
     for (var si = 0; si < segs.length; si++) {
       g.newPath();
-      // 32 samples are sub-pixel accurate for a curve at this canvas size; the old 56 only
-      // added path points to every repaint.
-      for (var tt = 0; tt <= 32; tt++) {
-        var pt = cubicPointAt(segs[si], tt / 32);
+      for (var tt = 0; tt <= n; tt++) {
+        var pt = cubicPointAt(segs[si], tt / n);
         if (tt === 0) g.moveTo(mx(pt[0]), my(pt[1]));
         else g.lineTo(mx(pt[0]), my(pt[1]));
       }
@@ -1833,9 +1908,9 @@
     if (!h) return "";
     if (isMulti() && (h === "mode:in" || h === "mode:out" || h === "mode:inout")) {
       return TR("多点模式写入两侧，入 / 出 / 双侧只在单段模式生效",
-        "Multi-point writes both sides; In/Out/Both apply to single-segment mode");
+        "Multi-point writes both sides; In/Out/Both only apply to single-segment mode");
     }
-    if (h === "icon:lang") return TR("语言", "Language");
+    if (h === "icon:settings") return TR("设置（语言 / 实时写入模式）", "Settings (language / live write mode)");
     if (h === "icon:import") return isMulti() ? T("导入选中关键帧为多点曲线") : T("导入选中关键帧的缓动曲线");
     if (h === "icon:overshoot") return T(S.allowOvershoot ? "允许超出边界（链条断开）" : "限制在 0–1 内（链条连接）");
     if (h === "icon:realtime") return T(S.realtime ? "实时写入：开" : "实时写入：关");
@@ -1927,6 +2002,12 @@
             cx + Math.cos(a) * r * 0.92, cy + Math.sin(a) * r * 0.92, color, 4);
         }
         circle(g, cx, cy, r * 0.18, null, color, 1.5);
+      }
+      return;
+    }
+    if (kind === "hamburger") {
+      for (var hb = -1; hb <= 1; hb++) {
+        line(g, cx - r * 0.5, cy + hb * r * 0.36, cx + r * 0.5, cy + hb * r * 0.36, color, 1.9);
       }
       return;
     }
@@ -2095,13 +2176,25 @@
     menu = null;
     redraw(true);
   }
-  function openLanguageMenu(x, y) {
-    menu = {
-      x: x, y: y, w: 150, items: [
-        { label: (en() ? "✓ " : "") + "English", action: function () { setLanguage("en"); } },
-        { label: (!en() ? "✓ " : "") + "中文", action: function () { setLanguage("zh"); } }
-      ]
-    };
+  function openSettingsMenu(x, y) {
+    // 1.0.13: the globe moved in here, and the live-write mode switch joined it. With it on, a
+    // drag only previews and the timeline is written when the pointer is released.
+    var items = [
+      { header: true, label: T("设置") },
+      { label: (en() ? "✓ " : "") + "English", action: function () { setLanguage("en"); } },
+      { label: (!en() ? "✓ " : "") + "中文", action: function () { setLanguage("zh"); } },
+      { header: true, label: T("实时写入模式") },
+      {
+        label: (S.writeOnRelease ? "✓ " : "") + T("停止拖动后写入"),
+        action: function () {
+          S.writeOnRelease = !S.writeOnRelease;
+          saveState();
+          st(S.writeOnRelease ? "实时写入模式：停止拖动后写入" : "实时写入模式：随时写入",
+            S.writeOnRelease ? "Live write mode: on release" : "Live write mode: continuous");
+        }
+      }
+    ];
+    menu = { x: x, y: y, w: 214, items: items };
     redraw(true);
   }
   function menuLayout(g) {
@@ -2187,7 +2280,12 @@
     var groups = S.userGroups, names = [], values = [], i;
     for (i = 0; i < groups.length; i++) { names.push(groupDisplayName(groups[i])); values.push(groups[i].name); }
     var name = TR("我的缓动", "My Ease");
-    var groupName = groups.length ? groupDisplayName(groups[0]) : TR("我的预设", "My Presets");
+    // 1.0.12: the dialog defaults to the group selected in the panel, so right-click → save while
+    // 经典 is selected saves into 经典 without touching the dropdown.
+    var cur = null;
+    for (i = 0; i < groups.length; i++) if (groups[i].id === S.selectedGroupId) { cur = groups[i]; break; }
+    if (!cur && groups.length) cur = groups[0];
+    var groupName = cur ? groupDisplayName(cur) : TR("我的预设", "My Presets");
     var res = presetSaveDialog(name, groupName, names);
     if (!res) return;
     var gname = cleanName(res.group), pname = cleanName(res.name);
@@ -2727,11 +2825,18 @@
         if (liveMode && drag.moved && isMulti()) applyLive(true);
         endLiveGroup();
         liveMode = false;
+        // 1.0.13: write-on-release mode: the drag only previews, the timeline is written once when
+        // the pointer is released (multi-point curves rebuild the keys, single segments the eases).
+        if (S.realtime && S.writeOnRelease && drag.moved) {
+          try { if (isMulti()) applyMultiCurve(); else applyCurrent(false); } catch (e) {}
+        }
         if (drag.moved) {
           if (isMulti()) {
-            if (S.realtime) st("已实时写入多点关键帧", "Multi-point keyframes written live");
+            if (S.realtime) st(S.writeOnRelease ? "已写入关键帧（停止拖动后写入）" : "已实时写入多点关键帧",
+              S.writeOnRelease ? "Keyframes written on release" : "Multi-point keyframes written live");
             else st("多点曲线已更新；点 √ 写入时间线关键帧", "Multi-point curve updated; click √ to write timeline keys");
-          } else if (S.realtime) st("已实时写入缓动", "Easing written live");
+          } else if (S.realtime) st(S.writeOnRelease ? "已写入缓动（停止拖动后写入）" : "已实时写入缓动",
+            S.writeOnRelease ? "Easing written on release" : "Easing written live");
           else st("预览已更新，点 √ 写入关键帧", "Preview updated; click √ to write keyframes");
           saveState();
         }
@@ -2770,7 +2875,7 @@
   function activate(hit, x, y) {
     var id = idOf(hit);
     if (!id) return;
-    if (id === "icon:lang") { openLanguageMenu(x || 0, y || 0); return; }
+    if (id === "icon:settings") { openSettingsMenu(x || 0, y || 0); return; }
     if (id === "icon:overshoot") {
       S.allowOvershoot = !S.allowOvershoot;
       if (!S.allowOvershoot) clampAllAnchors();
@@ -2785,7 +2890,7 @@
           S.realtime ? "Live write on: dragging points or levers rebuilds the timeline keys" : "Live write is off");
       } else {
         st(S.realtime ? "实时写入已开启：拖动控制点会立即写入关键帧" : "实时写入已关闭：调整只预览",
-          S.realtime ? "Live write on: dragging controls writes keyframes immediately" : "Live write off: adjustments preview only");
+          S.realtime ? "Live write on: dragging controls writes keyframes" : "Live write off: adjustments preview only");
       }
       saveState();
       // Single mode only applies the already-loaded curve here; multi-point apply rebuilds
@@ -2801,7 +2906,7 @@
     if (id === "mode:in" || id === "mode:out" || id === "mode:inout") {
       if (isMulti()) {
         st("多点模式按点写入两侧，入 / 出 / 双侧只在单段模式生效",
-          "Multi-point writes both sides; In/Out/Both apply to single-segment mode");
+          "Multi-point writes both sides; In/Out/Both only apply to single-segment mode");
         redraw();
         return;
       }
