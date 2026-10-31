@@ -1,8 +1,11 @@
 /*
- * KCurve 1.1.0 — Flow-style easing curve editor for EffectCraft.
+ * KCurve 2.0.0 — Flow-style easing curve editor for EffectCraft.
+ *
+ * Platform: EffectCraft 0.19.0. Docked adaptive resizing is a 0.19-only feature; older versions
+ * (0.13–0.18) are untested and not supported for this release.
  *
  * Run it from File ▸ Scripts ▸ Run Script File… (a floating, resizable palette), or install it
- * with File ▸ Scripts ▸ Install ScriptUI Panel… (the docked panel opens the floating editor).
+ * with File ▸ Scripts ▸ Install ScriptUI Panel… (the docked panel is the editor itself).
  *
  * Design notes
  * ------------
@@ -46,11 +49,16 @@
  * emitted as an expression instead of touching keyframe eases; the editor and preset format stay
  * the same.
  *
- * Platform limitation (0.13.0): a DOCKED ScriptUI panel never learns its real allocated size; the
- * host lays out a clone but onDraw runs at the panel's preferredSize (see
- * docs/effectcraft/KCURVE_NOTES.md §6). A resizable curve canvas therefore has to be a floating
- * Window. KCurve's editor is floating and resizes by dragging its right/bottom edges. The installed
- * ScriptUI panel is a small launcher for the same floating editor.
+ * Docked panel sizing: 0.19.0 removes the old limitation (EffectCraft #2585). A docked ScriptUI
+ * panel now learns its dock's size: the host sends scriptui.resize and the root Panel runs
+ * onResizing/onResize with window.size already updated. onDraw reads the canvas size, so the panel
+ * reflows to the dock instead of staying at its preferredSize; older builds (0.13–0.18) still get
+ * the fixed 340x530 canvas. The floating editor resizes by dragging its right/bottom edges.
+ *
+ * Mouse capture: 0.19.0 (EffectCraft #2584) keeps sending mousemove and mouseup to the control a
+ * drag started on, outside the control and the window, and every MouseEvent carries `buttons`
+ * (1 left, 2 right, 4 middle). KCurve therefore keeps a drag alive across mouseout instead of
+ * cancelling it; on older builds (no `buttons`) the old mouseout cancellation still applies.
  *
  * Material 3 Expressive: everything except the editor canvas is drawn as rounded cards/pills, with
  * a dark/light palette read from EffectCraft's appearance.theme and large, expressive radii.
@@ -61,16 +69,22 @@
 
 (function (thisObj) {
   // ---------------------------------------------------------------- constants
-  var KCURVE_VERSION = "1.1.0";
+  var KCURVE_VERSION = "2.0.0";
   var SETTINGS_SECTION = "KCurve";
   var SETTINGS_KEY = "state";
-  var STATE_VERSION = 5;
+  var STATE_VERSION = 6;
   var DEFAULT_W = 600;
   var DEFAULT_H = 780;
   var MIN_W = 380;
   var MIN_H = 600;
+  // Docked panel: 340x530 is the initial preferred size (what 0.13–0.18 always use). 0.19.0 gives
+  // the panel its dock's real size; the layout below reflows between these minimums and the dock.
   var FIXED_W = 340;
   var FIXED_H = 530;
+  var MIN_DOCK_W = 200;
+  var MIN_DOCK_H = 300;
+  var MIN_EDITOR_H = 110;
+  var MIN_PRESET_H = 96;
   var BEZIER = KeyframeInterpolationType.BEZIER;
   var HOLD = KeyframeInterpolationType.HOLD;
   var IS_PANEL = thisObj instanceof Panel;
@@ -80,6 +94,15 @@
     : "Noto Sans CJK SC";
 
   // ---------------------------------------------------------------- small utils
+  // EffectCraft 0.19.0 reports a docked panel's real size (scriptui.resize, root onResize) and
+  // captures drags past the window edge (#2585, #2584). Older builds know neither, so the panel
+  // keeps its fixed size there. `app.version` looks like "26.0 (EffectCraft 0.19.0)".
+  function hostVersionAtLeast(majorWanted, minorWanted) {
+    var m = /EffectCraft\s+(\d+)\.(\d+)/.exec(String(app.version || ""));
+    if (!m) return false;
+    var maj = parseInt(m[1], 10), min = parseInt(m[2], 10);
+    return maj > majorWanted || (maj === majorWanted && min >= minorWanted);
+  }
   function clamp(v, lo, hi) { return v < lo ? lo : v > hi ? hi : v; }
   function finite(v) { return typeof v === "number" && isFinite(v); }
   function n(v, d) { return finite(Number(v)) ? Number(v) : d; }
@@ -110,11 +133,21 @@
   }
   function nowMs() { return new Date().getTime(); }
 
-  // ---------------------------------------------------------------- colours (sRGB hex → linear RGBA)
+  // ---------------------------------------------------------------- colours (sRGB hex → script colour)
+  // EffectCraft 0.19.0 fixed script-drawn colours showing too bright (upstream #2272): a ScriptUI
+  // colour is now plain sRGB, as After Effects does it. Through 0.18 the host treated the values
+  // as linear light and applied the sRGB curve on screen, which is why KCurve used to pass
+  // srgbToLinear() values to cancel it out. Pick the space the running host expects; either way
+  // the same hex lands on screen as the same colour.
+  var HOST_SCRIPT_COLORS_ARE_SRGB = false;
+  try { HOST_SCRIPT_COLORS_ARE_SRGB = hostVersionAtLeast(0, 19); } catch (e) {}
   var paletteCache = {};
   function srgbToLinear(v) {
     v = v / 255;
     return v <= 0.04045 ? v / 12.92 : Math.pow((v + 0.055) / 1.055, 2.4);
+  }
+  function channelToHost(v255) {
+    return HOST_SCRIPT_COLORS_ARE_SRGB ? v255 / 255 : srgbToLinear(v255);
   }
   function C(hex, alpha) {
     var h = String(hex).replace(/^#/, "");
@@ -122,9 +155,9 @@
     var key = h + "|" + (alpha === undefined ? 1 : alpha);
     if (paletteCache[key]) return paletteCache[key];
     var c = [
-      srgbToLinear(parseInt(h.substr(0, 2), 16)),
-      srgbToLinear(parseInt(h.substr(2, 2), 16)),
-      srgbToLinear(parseInt(h.substr(4, 2), 16)),
+      channelToHost(parseInt(h.substr(0, 2), 16)),
+      channelToHost(parseInt(h.substr(2, 2), 16)),
+      channelToHost(parseInt(h.substr(4, 2), 16)),
       alpha === undefined ? 1 : alpha
     ];
     paletteCache[key] = c;
@@ -186,7 +219,7 @@
     var t = readTheme();
     if (t !== P.name) {
       P = makePalette(t);
-      paletteCache = {}; // keep hex→linear cache, it does not depend on the palette
+      paletteCache = {}; // hex→host-colour cache; a palette swap does not change it (this resets memory)
       return true;
     }
     return false;
@@ -194,17 +227,25 @@
 
   // ---------------------------------------------------------------- fonts & text
   var fontCache = {};
+  var textWidthCache = {}, textWidthCacheCount = 0;
   function font(size, style) {
     var k = size + "|" + (style || "REGULAR");
     if (!fontCache[k]) fontCache[k] = ScriptUI.newFont(FONT_FAMILY, style || "REGULAR", size);
     return fontCache[k];
   }
   function measure(g, text, size, style, maxW) {
+    // Measuring text through the host is the most repeated expensive call in a repaint (status,
+    // labels, preset names). Cache by content + font + cap; the panel's strings are stable.
+    var ck = size + "|" + (style || "REGULAR") + "|" + (maxW === undefined ? -1 : maxW) + "|" + String(text);
+    if (textWidthCache[ck] !== undefined) return textWidthCache[ck];
     try {
       g.font = font(size, style);
       var m = g.measureString(String(text), g.font);
       var w = m ? m[0] : String(text).length * size * 0.55;
-      if (maxW !== undefined && maxW > 0 && w > maxW) return maxW;
+      if (maxW !== undefined && maxW > 0 && w > maxW) w = maxW;
+      if (textWidthCacheCount > 2000) { textWidthCache = {}; textWidthCacheCount = 0; }
+      textWidthCache[ck] = w;
+      textWidthCacheCount++;
       return w;
     } catch (e) { return String(text).length * size * 0.55; }
   }
@@ -648,10 +689,16 @@
     }
     return out;
   }
+  var selectionCountCache = { t: -1e9, v: { props: 0, keys: 0 } };
   function selectionCount() {
+    var now = nowMs();
+    // The draw path and the spin timer ask for this repeatedly; enumerating the host's selected
+    // properties/keys is a cross-boundary call, so reuse the result for a short moment.
+    if (now - selectionCountCache.t < 120) return selectionCountCache.v;
     var k = selectedKeyed(), total = 0, i;
     for (i = 0; i < k.length; i++) total += k[i].keys.length;
-    return { props: k.length, keys: total };
+    selectionCountCache = { t: now, v: { props: k.length, keys: total } };
+    return selectionCountCache.v;
   }
   function readPairCurve(p, a) {
     try {
@@ -671,7 +718,12 @@
       var x2 = 1 - inInf;
       var y2 = 1 - (Number(qe.speed) / s[d]) * inInf;
       if (!finite(x1) || !finite(y1) || !finite(x2) || !finite(y2)) return null;
-      return { x1: x1, y1: clamp(y1, -2, 3), x2: x2, y2: clamp(y2, -2, 3) };
+      // Do NOT clamp the lever y here. A multi-point segment whose endpoints barely differ in
+      // value can need a large lever offset relative to that tiny value span (e.g. a bounce that
+      // dips far below a nearly-flat segment); clamping y to -2..3 flattened those handles when
+      // importing keyframes back. The editor's absolute y clamp in clampAnchorHandles() is the
+      // real limit.
+      return { x1: x1, y1: y1, x2: x2, y2: y2 };
     } catch (e) { return null; }
   }
   function captureCurve() {
@@ -1082,6 +1134,10 @@
       allowOvershoot: false,
       realtime: false,
       writeOnRelease: false,
+      toolsOpen: false,
+      toolVisible: {},
+      presetSide: "top",
+      onlySelectedHandles: false,
       applyMode: "inout",
       showAllGroups: false,
       collapsed: {},
@@ -1122,6 +1178,17 @@
     "语言": "Language",
     "中文": "中文",
     "设置": "Settings",
+    "工具栏": "Toolbar",
+    "显示工具栏": "Show tools",
+    "预设库位置": "Presets position",
+    "上侧": "Top",
+    "左侧": "Left",
+    "右侧": "Right",
+    "编辑器": "Editor",
+    "只显示选中点的操纵杆": "Show levers for the selected point only",
+    "工具显示…": "Tool visibility…",
+    "工具显示": "Tool visibility",
+    "返回设置": "Back to settings",
     "实时写入模式": "Live write mode",
     "停止拖动后写入": "Write on release",
     "跟随软件": "Follow App Language",
@@ -1176,7 +1243,16 @@
     "标准 Standard": "Standard",
     "标准减速": "Std Out",
     "标准加速": "Std In",
-    "弹性 Overshoot": "Overshoot"
+    "弹性 Overshoot": "Overshoot",
+    "曲线 1": "Curve 1",
+    "曲线 2": "Curve 2",
+    "曲线 3": "Curve 3",
+    "曲线 4": "Curve 4",
+    "曲线 5": "Curve 5",
+    "曲线 6": "Curve 6",
+    "曲线 7": "Curve 7",
+    "曲线 8": "Curve 8",
+    "曲线 9": "Curve 9"
   };
   function presetDisplayName(p) {
     if (!p) return "";
@@ -1199,7 +1275,7 @@
     return "zh";
   }
   function loadState() {
-    var st = defaultState(), loadedVersion = 0, hadLanguage = false;
+    var st = defaultState(), loadedVersion = 0, hadLanguage = false, migratedClassic = false;
     try {
       if (app.settings.haveSetting(SETTINGS_SECTION, SETTINGS_KEY)) {
         var raw = app.settings.getSetting(SETTINGS_SECTION, SETTINGS_KEY);
@@ -1211,6 +1287,14 @@
           if (o.allowOvershoot === true) st.allowOvershoot = true;
           if (o.realtime === true) st.realtime = true;
           if (o.writeOnRelease === true) st.writeOnRelease = true;
+          if (typeof o.toolsOpen === "boolean") st.toolsOpen = o.toolsOpen;
+          if (o.presetSide === "top" || o.presetSide === "left" || o.presetSide === "right") st.presetSide = o.presetSide;
+          if (o.onlySelectedHandles === true) st.onlySelectedHandles = true;
+          if (o.toolVisible && typeof o.toolVisible === "object") {
+            for (var tk in o.toolVisible) {
+              if (o.toolVisible.hasOwnProperty(tk) && o.toolVisible[tk] === false) st.toolVisible[tk] = false;
+            }
+          }
           if (o.applyMode === "in" || o.applyMode === "out" || o.applyMode === "inout") st.applyMode = o.applyMode;
           if (o.showAllGroups === true) st.showAllGroups = true;
           if (o.collapsed && typeof o.collapsed === "object") st.collapsed = o.collapsed;
@@ -1237,11 +1321,18 @@
     // STATE_VERSION 3: the built-in preset groups moved into the editable user groups (one-time).
     // STATE_VERSION 4: the bounce group was added after that migration, so v3 states get it once.
     // STATE_VERSION 5: the demo bounce curves are replaced by copies of 我的预设.
+    // STATE_VERSION 6: 经典 is rebuilt with the nine curves from 1.1.14.
     if (loadedVersion >= 3) st.builtinsMigrated = true;
     if (!st.builtinsMigrated) migrateBuiltins(st);
     else if (loadedVersion < 4) migrateBuiltinGroup(st, "builtin_bounce");
     if (loadedVersion < 5) migrateBounceFromUserGroups(st);
+    if (loadedVersion < 6) {
+      migrateClassicPresets(st);
+      st.version = STATE_VERSION;
+      migratedClassic = true;
+    }
     S = st;
+    enforceEndpoints(S.anchors);
     ensureGroupOrder();
     if (!S.selectedGroupId || !groupById(S.selectedGroupId)) {
       var gs = allGroups();
@@ -1254,7 +1345,8 @@
       if (loadedVersion < 2) for (var mi = 0; mi < S.anchors.length; mi++) S.anchors[mi].smooth = false;
       ensureMultiHandles(S.anchors);
     }
-    if (!S.allowOvershoot) clampAllAnchors();
+    clampAllAnchors();
+    if (migratedClassic) saveState();
   }
   function sanitizeGroup(g) {
     if (!g || typeof g.name !== "string") return null;
@@ -1359,6 +1451,18 @@
     }
     bounce.presets = presets;
   }
+  // STATE_VERSION 6: 经典 now holds exactly the nine 1.1.14 curves; older Classic presets are removed.
+  function migrateClassicPresets(st) {
+    var target = null, i;
+    for (i = 0; i < st.userGroups.length; i++) if (st.userGroups[i].id === "builtin_classic") target = st.userGroups[i];
+    if (!target) {
+      for (i = 0; i < st.userGroups.length; i++) {
+        if (st.userGroups[i].name === "经典" || st.userGroups[i].name === "Classic") { target = st.userGroups[i]; break; }
+      }
+    }
+    if (!target) return;
+    target.presets = classicPresets();
+  }
   function saveState() {
     if (!S) return;
     try {
@@ -1368,6 +1472,10 @@
         allowOvershoot: !!S.allowOvershoot,
         realtime: !!S.realtime,
         writeOnRelease: !!S.writeOnRelease,
+        toolsOpen: S.toolsOpen !== false,
+        toolVisible: S.toolVisible || {},
+        presetSide: S.presetSide || "top",
+        onlySelectedHandles: !!S.onlySelectedHandles,
         applyMode: S.applyMode,
         showAllGroups: !!S.showAllGroups,
         collapsed: S.collapsed,
@@ -1395,48 +1503,50 @@
       h.x = clamp(h.x, 0, 1); h.y = clamp(h.y, 0, 1);
     }
   }
-  // Clamp in x/y independently, but never let a lever collapse onto its point at a viewport
-  // corner. A collapsed lever was invisible/unselectable and felt stuck at the border. If the
-  // clamped point has essentially no length, nudge it a little towards the middle.
+  // Clamp a lever to its segment. An exactly collapsed lever (sitting on its point) is allowed:
+  // the handle dot is drawn above the anchor and hit-testing gives the handle the tie, so it stays
+  // grabbable without the old 0.03 nudge that kept it slightly off (0,0).
   function clampHandle(a, h, minX, maxX, minY, maxY) {
     if (!h) return;
     h.x = clamp(h.x, minX, maxX);
     h.y = clamp(h.y, minY, maxY);
-    var dx = h.x - a.x, dy = h.y - a.y;
-    if (dx * dx + dy * dy < 0.0004) {
-      var midX = (minX + maxX) / 2, midY = (minY + maxY) / 2;
-      h.x = clamp(a.x + (a.x < midX ? 0.03 : -0.03), minX, maxX);
-      h.y = clamp(a.y + (a.y < midY ? 0.03 : -0.03), minY, maxY);
-    }
   }
   function clampAnchorHandles(i) {
-    var a = S.anchors[i];
+    var a = S.anchors[i], last = S.anchors.length - 1;
     if (!a) return;
-    if (!S.allowOvershoot) {
-      a.y = clamp(a.y, 0, 1);
-      clampHandle(a, a.hIn, 0, 1, 0, 1);
-      clampHandle(a, a.hOut, 0, 1, 0, 1);
-    } else {
-      a.y = clamp(a.y, -1, 2);
-      clampHandle(a, a.hIn, -0.4, 1.4, -1.2, 2.2);
-      clampHandle(a, a.hOut, -0.4, 1.4, -1.2, 2.2);
+    if (i === 0) { a.x = 0; a.y = 0; }
+    else if (i === last) { a.x = 1; a.y = 1; }
+    if (i !== 0 && i !== last) {
+      a.y = S.allowOvershoot ? clamp(a.y, -1, 2) : clamp(a.y, 0, 1);
+      a.x = clamp(a.x, S.anchors[i - 1].x + 0.003, S.anchors[i + 1].x - 0.003);
     }
-    if (i === 0) a.x = 0;
-    else if (i === S.anchors.length - 1) a.x = 1;
-    else a.x = clamp(a.x, S.anchors[i - 1].x + 0.003, S.anchors[i + 1].x - 0.003);
-    if (!S.allowOvershoot) {
-      clampHandle(a, a.hIn, 0, 1, 0, 1);
-      clampHandle(a, a.hOut, 0, 1, 0, 1);
-    } else {
-      clampHandle(a, a.hIn, -0.4, 1.4, -1.2, 2.2);
-      clampHandle(a, a.hOut, -0.4, 1.4, -1.2, 2.2);
-    }
+    // A lever may only work inside its own segment: the in-lever of a point stays between the
+    // previous point and this one, the out-lever between this point and the next. This is the same
+    // 0–100% influence limit After Effects applies; overshoot only relaxes the value (y) range.
+    var prev = i > 0 ? S.anchors[i - 1] : null;
+    var next = i < last ? S.anchors[i + 1] : null;
+    var yMin = S.allowOvershoot ? -1.2 : 0;
+    var yMax = S.allowOvershoot ? 2.2 : 1;
+    clampHandle(a, a.hIn, prev ? prev.x : 0, a.x, yMin, yMax);
+    clampHandle(a, a.hOut, a.x, next ? next.x : 1, yMin, yMax);
+  }
+  function enforceEndpoints(a) {
+    if (!a || !a.length) return;
+    a[0].x = 0; a[0].y = 0;
+    var last = a[a.length - 1];
+    last.x = 1; last.y = 1;
   }
   function pointInRect(x, y, r) { return r && x >= r.x && x <= r.x + r.w && y >= r.y && y <= r.y + r.h; }
 
   // ---------------------------------------------------------------- module state (UI)
   var win = null, canvas = null, L = null, editorOpen = false;
   var hoverId = null, pressedId = null, drag = null;
+  // null = not seen yet; true = MouseEvent carries `buttons` (EffectCraft 0.19+, #2584), which
+  // also means a drag keeps receiving moves and the release outside the window.
+  var pointerHasButtons = null;
+  // Whether the button that started the current drag was down according to its mousedown (a
+  // synthetic sequence that omits buttons never triggers the lost-release fallback).
+  var pressedHeld = false;
   var statusText = "选择关键帧 · 拖曲线 · 点 √ 写入";
   var menu = null;
   var liveMode = false;
@@ -1470,24 +1580,49 @@
     spinTask = null;
   }
   function startSpinTask() {
-    if (!win || spinTask !== null) return;
+    if (!canvas || spinTask !== null) return;
     try { spinTask = app.scheduleTask("KCurveSpinTick()", 80, true); } catch (e) { spinTask = null; }
   }
-  var lastSpinSelection = -1;
-  thisObj.KCurveSpinTick = function () {
+  var lastSpinSelection = -1, lastSpinSelectionCheck = 0;
+  function gearVisible() {
+    if (!L || !L.func || !L.func.controls) return false;
+    for (var i = 0; i < L.func.controls.length; i++) if (L.func.controls[i].id === "icon:realtime") return true;
+    return false;
+  }
+  function kcurveSpinTick() {
     try {
-      if (!win || !canvas) { stopSpinTask(); return; }
-      // The gear's orbiting notch only animates while live write is on. Otherwise repaint only
-      // when the timeline selection changed (the status line shows it), instead of rebuilding the
-      // whole draw list 12.5 times a second for a panel that looks the same.
-      if (S.realtime) { redraw(); return; }
+      // Works for both the docked panel (win is null) and the floating editor.
+      if (!canvas) { stopSpinTask(); return; }
+      // Only repaint for the spinning gear when that button is actually visible; otherwise poll
+      // the timeline selection at 4 Hz instead of rebuilding the full draw list 12.5 times a second.
+      if (S.realtime && gearVisible()) { redraw(); return; }
+      var now = nowMs();
+      if (now - lastSpinSelectionCheck < 250) return;
+      lastSpinSelectionCheck = now;
       var sc = selectionCount();
       if (sc.keys !== lastSpinSelection) { lastSpinSelection = sc.keys; redraw(); }
     } catch (e) { stopSpinTask(); }
-  };
+  }
+  thisObj.KCurveSpinTick = kcurveSpinTick;
+  try { $.global.KCurveSpinTick = kcurveSpinTick; } catch (e) {}
 
   // ---------------------------------------------------------------- built-in presets
   function presetAnchors(x1, y1, x2, y2) { return anchorsFromSegment(x1, y1, x2, y2); }
+  // 1.1.14: the Classic group now holds these nine curves (the old eight were removed). The same
+  // factory is reused by the state-6 migration so existing installs get the new set too.
+  function classicPresets() {
+    return [
+      { id: "cl-1", name: "曲线 1", anchors: presetAnchors(0.00, 0.64, 0.24, 1.00) },
+      { id: "cl-2", name: "曲线 2", anchors: presetAnchors(1.00, 0.00, 1.00, 0.24) },
+      { id: "cl-3", name: "曲线 3", anchors: presetAnchors(0.47, 0.01, 0.55, 0.30) },
+      { id: "cl-4", name: "曲线 4", anchors: presetAnchors(0.00, 0.71, 0.36, 0.74) },
+      { id: "cl-5", name: "曲线 5", anchors: presetAnchors(0.31, 0.59, 0.45, 0.99) },
+      { id: "cl-6", name: "曲线 6", anchors: presetAnchors(0.00, 0.50, 1.00, 0.50) },
+      { id: "cl-7", name: "曲线 7", anchors: presetAnchors(0.50, 0.00, 0.50, 1.00) },
+      { id: "cl-8", name: "曲线 8", anchors: presetAnchors(0.00, 0.00, 1.00, 1.00) },
+      { id: "cl-9", name: "曲线 9", anchors: presetAnchors(0.25, 0.00, 0.75, 1.00) }
+    ];
+  }
   var BUILTIN_GROUPS = [
     {
       id: "builtin_m3", name: "Material 3", builtin: true, presets: [
@@ -1501,16 +1636,7 @@
       ]
     },
     {
-      id: "builtin_classic", name: "经典", builtin: true, presets: [
-        { id: "cl-easy", name: "Easy Ease", anchors: presetAnchors(0.33, 0, 0.67, 1) },
-        { id: "cl-inout", name: "Ease In-Out", anchors: presetAnchors(0.42, 0, 0.58, 1) },
-        { id: "cl-out", name: "Ease Out", anchors: presetAnchors(0, 0, 0.58, 1) },
-        { id: "cl-in", name: "Ease In", anchors: presetAnchors(0.42, 0, 1, 1) },
-        { id: "cl-expo-out", name: "Expo Out", anchors: presetAnchors(0.16, 1, 0.3, 1) },
-        { id: "cl-expo-inout", name: "Expo In-Out", anchors: presetAnchors(0.87, 0, 0.13, 1) },
-        { id: "cl-back-in", name: "Back In", anchors: presetAnchors(0.36, 0, 0.66, -0.56) },
-        { id: "cl-linear", name: "Linear", anchors: presetAnchors(1 / 3, 1 / 3, 2 / 3, 2 / 3) }
-      ]
+      id: "builtin_classic", name: "经典", builtin: true, presets: classicPresets()
     },
     {
       // The group itself is kept so 1.0.9 can fill it with copies of the user's 我的预设
@@ -1536,8 +1662,13 @@
     return out;
   }
   function presetLayoutKey(rect) {
-    var groups = allGroups(), parts = [rect.x, rect.y, rect.w, rect.h, S.selectedGroupId, S.scroll | 0, S.language], i;
-    for (i = 0; i < groups.length; i++) parts.push(groups[i].id + ":" + groups[i].name + ":" + groups[i].presets.length);
+    var groups = allGroups(), parts = [rect.x, rect.y, rect.w, rect.h, S.selectedGroupId, S.scroll | 0, S.language], i, j;
+    // Include the preset ids in order: reordering or moving a preset changes the layout, and a
+    // key without them kept the old cells (so the grid showed the previous order).
+    for (i = 0; i < groups.length; i++) {
+      parts.push(groups[i].id + ":" + groups[i].name + ":" + groups[i].presets.length);
+      for (j = 0; j < groups[i].presets.length; j++) parts.push(groups[i].presets[j].id);
+    }
     return parts.join("|");
   }
   function ensureGroupOrder() {
@@ -1594,21 +1725,55 @@
   }
 
   // ---------------------------------------------------------------- layout
+  // Builds the whole panel for the canvas size it is given. 0.19.0 hands the docked panel its real
+  // size (onDraw's canvas.size follows the dock), so every area is derived from W/H and can shrink
+  // or grow; the floors keep the two toolbar rows and the preset header usable.
   function buildLayout(g, W, H) {
     var pad = 8;
-    var editorH = clamp(Math.round(H * 0.36), 160, 280);
-    var editor = { x: pad, y: pad, w: W - 2 * pad, h: editorH };
-    var func = layoutFunction(g, editor.x, editor.y + editor.h + 6, editor.w);
-    var presetY = func.y + func.h + 6;
-    var presetH = H - presetY - pad;
-    if (presetH < 118) {
-      var shrink = 118 - presetH + 6;
-      editor.h = Math.max(150, editor.h - shrink);
-      func = layoutFunction(g, editor.x, editor.y + editor.h + 6, editor.w);
-      presetY = func.y + func.h + 6;
-      presetH = H - presetY - pad;
+    W = Math.max(MIN_DOCK_W, Math.round(W || 0));
+    H = Math.max(MIN_DOCK_H, Math.round(H || 0));
+    var side = (S.presetSide === "left" || S.presetSide === "right") ? S.presetSide : "top";
+    var editor, func, preset;
+    if (side !== "top") {
+      var sideGap = 10;
+      var contentW = W - 2 * pad;
+      var sideW = clamp(Math.round(contentW * 0.42), 160, 320);
+      var editorW = contentW - sideW - sideGap;
+      // A side-by-side split only makes sense with a usable curve area; on a narrow dock keep the
+      // familiar stacked layout (the setting stays, and the menu says so).
+      if (editorW < 190 || sideW < 150) side = "top";
     }
-    var preset = { x: pad, y: presetY, w: W - 2 * pad, h: Math.max(70, presetH) };
+    if (side === "top") {
+      var editorH = clamp(Math.round(H * 0.38), MIN_EDITOR_H, 340);
+      editor = { x: pad, y: pad, w: W - 2 * pad, h: editorH };
+      func = layoutFunction(g, editor.x, editor.y + editor.h + 6, editor.w);
+      var presetY = func.y + func.h + 6;
+      var presetH = H - presetY - pad;
+      if (presetH < MIN_PRESET_H) {
+        // A short dock: give the preset list the room it needs by shrinking the curve editor first.
+        var wanted = Math.max(MIN_EDITOR_H, editor.h - (MIN_PRESET_H - presetH));
+        if (wanted !== editor.h) {
+          editor.h = wanted;
+          func = layoutFunction(g, editor.x, editor.y + editor.h + 6, editor.w);
+          presetY = func.y + func.h + 6;
+          presetH = H - presetY - pad;
+        }
+      }
+      preset = { x: pad, y: presetY, w: W - 2 * pad, h: Math.max(48, presetH) };
+    } else {
+      var sideGap2 = 10;
+      var contentW2 = W - 2 * pad;
+      var sideW2 = clamp(Math.round(contentW2 * 0.42), 160, 320);
+      var editorW2 = contentW2 - sideW2 - sideGap2;
+      var onLeft = side === "left";
+      var editorX = onLeft ? pad : pad + sideW2 + sideGap2;
+      var presetX = onLeft ? pad + editorW2 + sideGap2 : pad;
+      var measure = layoutFunction(g, editorX, 0, editorW2);
+      var editorH2 = Math.max(MIN_EDITOR_H, H - 2 * pad - measure.h - 6);
+      editor = { x: editorX, y: pad, w: editorW2, h: editorH2 };
+      func = layoutFunction(g, editorX, pad + editorH2 + 6, editorW2);
+      preset = { x: presetX, y: pad, w: sideW2, h: H - 2 * pad };
+    }
     var plKey = presetLayoutKey(preset);
     var pl;
     if (presetLayoutCache && presetLayoutCache.key === plKey) {
@@ -1618,7 +1783,7 @@
       presetLayoutCache = { key: plKey, pl: pl };
     }
     var lay = {
-      W: W, H: H, editor: editor, func: func, preset: preset,
+      W: W, H: H, side: side, editor: editor, func: func, preset: preset,
       controls: [], handles: [], anchors: [], presetLayout: pl,
       resize: {
         e: { x: W - 6, y: 0, w: 6, h: H },
@@ -1644,62 +1809,121 @@
     }
   }
   // ---------------------------------------------------------------- toolbar layout
-  // Two fixed rows: editing actions on top; language, live write and the write-side modes
-  // (In / Out / Both) underneath. Fixed rows keep the tools from wrapping unpredictably.
-  function layoutFunction(g, x, y, w) {
-    var top = [
+  // One always-visible row holds the fold toggle, the Apply button and the save-preset star.
+  // Opening the fold adds the tool buttons: up to five on the first tool row, the rest (and the
+  // write-side modes) on the rows below. Both the count and the row wrapping adapt to the width,
+  // so a narrow dock pushes tools down instead of overlapping them; Apply always stretches into
+  // whatever space the row has left.
+  function toolVisible(id) {
+    return !(S.toolVisible && S.toolVisible[id] === false);
+  }
+  // Every toolbar tool has its own visibility switch (settings ▸ tool visibility); hidden tools
+  // are skipped by the layout, so the remaining rows reflow.
+  var TOOL_VISIBILITY = [
+    { id: "icon:import", zh: "导入", en: "Import" },
+    { id: "icon:reverse", zh: "反转曲线", en: "Reverse curve" },
+    { id: "icon:overshoot", zh: "超出边界", en: "Overshoot" },
+    { id: "icon:add", zh: "添加点", en: "Add point" },
+    { id: "icon:del", zh: "删除点", en: "Delete point" },
+    { id: "icon:smooth", zh: "平滑 / 折断", en: "Smooth / broken" },
+    { id: "icon:realtime", zh: "实时写入", en: "Live write" },
+    { id: "mode:in", zh: "入侧", en: "In side" },
+    { id: "mode:out", zh: "出侧", en: "Out side" },
+    { id: "mode:inout", zh: "双侧", en: "Both sides" }
+  ];
+  function toolLabel(id) {
+    for (var i = 0; i < TOOL_VISIBILITY.length; i++) {
+      if (TOOL_VISIBILITY[i].id === id) return TR(TOOL_VISIBILITY[i].zh, TOOL_VISIBILITY[i].en);
+    }
+    return id;
+  }
+
+  function toolControls() {
+    var multiMode = isMulti();
+    var list = [
       { id: "icon:import", type: "tool", icon: "import" },
+      { id: "icon:reverse", type: "tool", icon: "reverse" },
       { id: "icon:overshoot", type: "tool", icon: "overshoot", on: !!S.allowOvershoot },
       { id: "icon:add", type: "tool", icon: "plus" },
-      { id: "icon:del", type: "tool", icon: "minus" }
-    ];
-    if (isMulti()) {
-      top.push({
+      { id: "icon:del", type: "tool", icon: "minus" },
+      // Always present: in single mode it is dimmed (there is no middle point to constrain), so
+      // the smooth/broken control does not vanish when the curve goes back to two points.
+      {
         id: "icon:smooth", type: "tool", icon: "smooth",
-        active: !!(S.anchors[S.selectedAnchor] && S.anchors[S.selectedAnchor].smooth !== false)
-      });
-    }
-    var apply = { id: "button:apply", type: "apply", icon: "check", w: 36, h: 30 };
-    var lower = [
-      { id: "icon:settings", type: "tool", icon: "hamburger" },
-      { id: "icon:realtime", type: "tool", icon: "gear", on: !!S.realtime }
-    ];
-    // The write-side selector is always visible. In multi-point mode it is dimmed: applying a
-    // multi-point curve writes both sides of every segment, so In/Out/Both do not apply there.
-    var multiMode = isMulti();
-    lower.push({ id: "mode:in", type: "mode", icon: "triLeft", active: !multiMode && S.applyMode === "in", disabled: multiMode });
-    lower.push({ id: "mode:out", type: "mode", icon: "triRight", active: !multiMode && S.applyMode === "out", disabled: multiMode });
-    lower.push({ id: "mode:inout", type: "mode", icon: "diamond", active: !multiMode && S.applyMode === "inout", disabled: multiMode });
-    var gap = 3, rowH = 32, controls = [];
-    function placeRow(list, startX, startY) {
-      var cx = startX, cy = startY;
-      for (var i = 0; i < list.length; i++) {
-        var c = list[i];
-        c.w = c.type === "mode" ? 26 : (c.type === "apply" ? 36 : 28);
-        c.h = c.type === "apply" ? 30 : (c.type === "mode" ? 26 : 28);
-        c.x = cx;
-        c.y = cy + (rowH - c.h) / 2;
-        c.rect = { x: c.x, y: c.y, w: c.w, h: c.h };
-        controls.push(c);
-        cx += c.w + gap;
+        active: multiMode && !!(S.anchors[S.selectedAnchor] && S.anchors[S.selectedAnchor].smooth !== false),
+        disabled: !multiMode
       }
-      return { bottom: cy + rowH, right: cx };
+    ];
+    list.push({ id: "icon:realtime", type: "tool", icon: "gear", on: !!S.realtime });
+    // In multi-point mode the write-side selector is dimmed: applying writes both sides of every
+    // segment, so In / Out / Both only apply to single-segment curves.
+    list.push({ id: "mode:in", type: "mode", icon: "triLeft", active: !multiMode && S.applyMode === "in", disabled: multiMode });
+    list.push({ id: "mode:out", type: "mode", icon: "triRight", active: !multiMode && S.applyMode === "out", disabled: multiMode });
+    list.push({ id: "mode:inout", type: "mode", icon: "diamond", active: !multiMode && S.applyMode === "inout", disabled: multiMode });
+    var visible = [];
+    for (var i = 0; i < list.length; i++) if (toolVisible(list[i].id)) visible.push(list[i]);
+    return visible;
+  }
+
+  function layoutFunction(g, x, y, w) {
+    var gap = 3, rowH = 32, controls = [];
+    function size(c) {
+      c.w = c.type === "mode" ? 26 : (c.type === "apply" ? 36 : 28);
+      c.h = c.type === "apply" ? 30 : (c.type === "mode" ? 26 : 28);
     }
-    var r1 = placeRow(top, x, y);
-    // The confirm button takes every pixel left over in the top row; the check is centred in it.
-    apply.x = r1.right;
+    function place(c, cx, cy) {
+      size(c);
+      c.x = cx;
+      c.y = cy + (rowH - c.h) / 2;
+      c.rect = { x: c.x, y: c.y, w: c.w, h: c.h };
+      controls.push(c);
+      return c;
+    }
+    var right = x + w;
+    var toggle = place({ id: "icon:settings", type: "tool", icon: "hamburger", active: S.toolsOpen !== false }, x, y);
+    var star = place({ id: "button:savePreset", type: "tool", icon: "star" }, right - 28, y);
+    var cursor = toggle.x + toggle.w + gap;
+    var apply = { id: "button:apply", type: "apply", icon: "check", w: 36, h: 30 };
+    // Reserve the star and the Apply button's minimum width before filling the top tool row.
+    var toolLimit = star.x - gap - 36 - gap;
+    var tools = toolControls(), i = 0, topCount = 0;
+    if (S.toolsOpen !== false) {
+      while (i < tools.length && topCount < 5) {
+        size(tools[i]);
+        if (cursor + tools[i].w > toolLimit) break;
+        place(tools[i], cursor, y);
+        cursor += tools[i].w + gap;
+        topCount++;
+        i++;
+      }
+    }
+    apply.x = cursor;
     apply.y = y + (rowH - apply.h) / 2;
-    apply.w = Math.max(36, (x + w) - apply.x);
+    apply.w = Math.max(36, star.x - gap - apply.x);
     apply.iconX = apply.x + apply.w / 2;
     apply.rect = { x: apply.x, y: apply.y, w: apply.w, h: apply.h };
     controls.push(apply);
-    placeRow(lower, x, r1.bottom + gap);
-    var bottom = 0;
-    for (var i = 0; i < controls.length; i++) bottom = Math.max(bottom, controls[i].y + controls[i].h);
+    var bottom = y + rowH;
+    if (S.toolsOpen !== false && i < tools.length) {
+      var rowX = x, rowCursor = rowX, rowY = y + rowH + gap;
+      while (i < tools.length) {
+        var rc = tools[i];
+        size(rc);
+        if (rowCursor > rowX && rowCursor + rc.w > right) {
+          rowY += rowH + gap;
+          rowCursor = rowX;
+        }
+        place(rc, rowCursor, rowY);
+        rowCursor += rc.w + gap;
+        i++;
+      }
+      bottom = rowY + rowH;
+    }
     var statusY = bottom + 5;
     return {
       id: "func", x: x, y: y, w: w, h: statusY + 16 - y,
-      controls: controls, apply: apply, statusY: statusY, statusH: 16
+      controls: controls, apply: apply, toggle: toggle, star: star,
+      statusY: statusY, statusH: 16
     };
   }
 
@@ -1712,25 +1936,15 @@
   }
 
   function layoutPresets(g, rect) {
-    var headerH = 28;
-    var saveW = 64;
-    var save = {
-      id: "button:savePreset", type: "pill", label: T("保存"), accent: true,
-      x: rect.x + rect.w - saveW, y: rect.y, w: saveW, h: 26,
-      rect: { x: rect.x + rect.w - saveW, y: rect.y, w: saveW, h: 26 }
-    };
-    var newGroup = {
-      id: "button:newGroup", type: "pillIcon", icon: "plus",
-      x: save.x - 32, y: rect.y, w: 26, h: 26,
-      rect: { x: save.x - 32, y: rect.y, w: 26, h: 26 }
-    };
+    // No section label: the group chips start directly at the top of the preset area.
+    var headerH = 0;
     var all = allGroups();
     var selected = null, i;
     for (i = 0; i < all.length; i++) if (all[i].id === S.selectedGroupId) { selected = all[i]; break; }
     if (!selected && all.length) { selected = all[0]; S.selectedGroupId = selected.id; }
 
     // Group chips: rounded rectangles whose width follows the label, wrapping horizontally.
-    var chipH = 24, chipGap = 5, chipX = rect.x, chipY = rect.y + headerH + 3, chips = [];
+    var chipH = 24, chipGap = 5, chipX = rect.x, chipY = rect.y + 3, chips = [];
     var chipRight = rect.x + rect.w;
     for (i = 0; i < all.length; i++) {
       var grp = all[i];
@@ -1743,8 +1957,21 @@
       });
       chipX += cw + chipGap;
     }
-    var chipsBottom = chips.length ? chipY + chipH : rect.y + headerH + 3;
-    var list = { x: rect.x, y: chipsBottom + 5, w: rect.w, h: Math.max(46, rect.h - (chipsBottom - rect.y) - 5) };
+    // "+" is a group slot: it sits immediately after the last chip (wrapping with them), not
+    // pinned to the panel's right edge.
+    var ngW = 26;
+    if (chipX > rect.x && chipX + ngW > chipRight) { chipX = rect.x; chipY += chipH + chipGap; }
+    var newGroup = {
+      id: "button:newGroup", kind: "newGroupChip", icon: "plus",
+      x: chipX, y: chipY, w: ngW, h: chipH,
+      rect: { x: chipX, y: chipY, w: ngW, h: chipH }
+    };
+    var chipsBottom = chipY + chipH;
+    var listY = chipsBottom + 5;
+    // The list gets whatever the chips left. On a very short dock it can be only a row tall; the
+    // scrollbar (and the cell clip in drawPresets) handles the rest instead of painting past the
+    // panel bottom.
+    var list = { x: rect.x, y: listY, w: rect.w, h: Math.max(32, rect.y + rect.h - listY - 2) };
 
     // Square preset previews, name underneath, wrapping into a grid for the selected group.
     var presets = selected ? selected.presets : [];
@@ -1784,8 +2011,9 @@
     }
     return {
       x: rect.x, y: rect.y, w: rect.w, h: rect.h, headerH: headerH,
-      save: save, newGroup: newGroup, chips: chips, selectedGroup: selected,
+      newGroup: newGroup, chips: chips, selectedGroup: selected,
       list: list, cells: cells, emptyRect: emptyRect,
+      cols: cols, cellW: cellW, cellH: cellH,
       contentH: contentH, maxScroll: maxScroll, scrollbar: scrollbar
     };
   }
@@ -1829,11 +2057,16 @@
   }
   function drawEditor(g, lay) {
     var r = lay.editor, multi = isMulti();
-    // 1.0.8: the editor is one dark rect with a one-pixel outline; the old thick card frame
-    // (and its 10px border) is gone, so the curve gets the whole editor area.
-    fillRect(g, r.x, r.y, r.w, r.h, P.bg);
-    strokeRect(g, r.x + 0.5, r.y + 0.5, Math.max(1, r.w - 1), Math.max(1, r.h - 1), withAlpha(P.outline, 0.7), 1);
-    var plot = { x: r.x + 1, y: r.y + 1, w: Math.max(1, r.w - 2), h: Math.max(1, r.h - 2) };
+    // Dark editor card with a blue outline and a slight rounded corner (the primary-colour frame
+    // says this is the live curve area; the plot is inset below so endpoint rings stay inside).
+    var cardR = 8;
+    fillRound(g, r.x, r.y, r.w, r.h, cardR, P.bg);
+    strokeRound(g, r.x + 0.75, r.y + 0.75, Math.max(1, r.w - 1.5), Math.max(1, r.h - 1.5),
+      Math.max(2, cardR - 0.75), withAlpha(P.primary, 0.8), 1.5);
+    // The first/last anchors are pinned to (0,0)/(1,1), so keep their selected rings inside the
+    // card: inset the plot by the ring's outer radius instead of starting one pixel from the edge.
+    var inset = 12;
+    var plot = { x: r.x + inset, y: r.y + inset, w: Math.max(1, r.w - 2 * inset), h: Math.max(1, r.h - 2 * inset) };
     var view = viewBounds();
     function mx(v) { return plot.x + (v - view.x0) / (view.x1 - view.x0) * plot.w; }
     function my(v) { return plot.y + plot.h - (v - view.y0) / (view.y1 - view.y0) * plot.h; }
@@ -1850,21 +2083,21 @@
     strokeCurveSegments(g, segs, mx, my, curvePen);
 
     var selected = clamp(S.selectedAnchor | 0, 0, S.anchors.length - 1);
+    var selectedOnly = !!S.onlySelectedHandles;
     var handlesHit = [], anchorsHit = [], ai, a, hx, hy;
     for (ai = 0; ai < S.anchors.length; ai++) {
-      // Multi mode shows levers only for the selected keyframe point, so the graph stays clean.
-      if (multi && ai !== selected) continue;
+      // By default every point shows its levers; the settings option restores the old "only the
+      // selected point" mode for a cleaner graph on dense curves.
+      if (multi && selectedOnly && ai !== selected) continue;
       a = S.anchors[ai];
       if (a.hIn) {
         hx = mx(a.hIn.x); hy = my(a.hIn.y);
         line(g, mx(a.x), my(a.y), hx, hy, withAlpha(P.text, 0.8), 1.6);
-        circle(g, hx, hy, 4.8, P.text, P.bg, 1.5);
         handlesHit.push({ kind: "handle", i: ai, side: "hIn", x: hx, y: hy, r: 11 });
       }
       if (a.hOut) {
         hx = mx(a.hOut.x); hy = my(a.hOut.y);
         line(g, mx(a.x), my(a.y), hx, hy, withAlpha(P.text, 0.8), 1.6);
-        circle(g, hx, hy, 4.8, P.text, P.bg, 1.5);
         handlesHit.push({ kind: "handle", i: ai, side: "hOut", x: hx, y: hy, r: 11 });
       }
     }
@@ -1910,13 +2143,23 @@
       return TR("多点模式写入两侧，入 / 出 / 双侧只在单段模式生效",
         "Multi-point writes both sides; In/Out/Both only apply to single-segment mode");
     }
-    if (h === "icon:settings") return TR("设置（语言 / 实时写入模式）", "Settings (language / live write mode)");
+    if (h === "icon:settings") {
+      return S.toolsOpen !== false
+        ? TR("收起工具栏（右键设置）", "Fold the tools (right-click for settings)")
+        : TR("展开工具栏（右键设置）", "Show the tools (right-click for settings)");
+    }
+    if (h === "button:savePreset") return TR("保存当前曲线为预设", "Save the current curve as a preset");
+    if (h === "button:newGroup") return TR("新建预设组", "New preset group");
+    if (h === "icon:reverse") return TR("反转曲线（时间和值都镜像）", "Reverse curve (mirror time and value)");
     if (h === "icon:import") return isMulti() ? T("导入选中关键帧为多点曲线") : T("导入选中关键帧的缓动曲线");
     if (h === "icon:overshoot") return T(S.allowOvershoot ? "允许超出边界（链条断开）" : "限制在 0–1 内（链条连接）");
     if (h === "icon:realtime") return T(S.realtime ? "实时写入：开" : "实时写入：关");
     if (h === "icon:add") return T("添加关键帧点");
     if (h === "icon:del") return T("删除当前关键帧点");
-    if (h === "icon:smooth") return T((S.anchors[S.selectedAnchor] && S.anchors[S.selectedAnchor].smooth !== false) ? "点击改成折断" : "点击改成平滑");
+    if (h === "icon:smooth") {
+      if (!isMulti()) return TR("多点模式才需要平滑 / 折断（先点 + 增加点）", "Smooth / broken applies to multi-point curves (click + first)");
+      return T((S.anchors[S.selectedAnchor] && S.anchors[S.selectedAnchor].smooth !== false) ? "点击改成折断" : "点击改成平滑");
+    }
     if (h === "mode:in") return T("只写入入侧");
     if (h === "mode:out") return T("只写入出侧");
     if (h === "mode:inout") return T("写入入侧和出侧");
@@ -1925,23 +2168,30 @@
   }
   function drawTool(g, c) {
     var hov = hoverId === c.id, press = pressedId === c.id;
+    // Import / add / delete / save-preset get the same press feedback as Apply: solid blue on
+    // press, a soft blue wash on hover.
+    var solidPress = c.id === "icon:import" || c.id === "icon:reverse" || c.id === "icon:add" ||
+      c.id === "icon:del" || c.id === "button:savePreset";
     // No resting chip: the toolbar is icon-only until the pointer reaches a control. Hover,
     // press and the selected mode paint the background; disabled modes (multi-point) never do.
     var rr = c.type === "mode" ? 9 : 10;
     if (!c.disabled) {
-      if (press) fillRound(g, c.x, c.y, c.w, c.h, rr, P.highest);
-      else if (hov) fillRound(g, c.x, c.y, c.w, c.h, rr, c.active ? P.primaryContainer : P.highest);
+      if (press) fillRound(g, c.x, c.y, c.w, c.h, rr, solidPress ? P.primary : P.highest);
+      else if (hov) fillRound(g, c.x, c.y, c.w, c.h, rr,
+        solidPress ? withAlpha(P.primary, 0.2) : (c.active ? P.primaryContainer : P.highest));
       else if (c.active) fillRound(g, c.x, c.y, c.w, c.h, rr, P.primaryContainer);
     }
     var col = c.disabled ? withAlpha(P.faint, 0.55)
-      : c.active ? P.onPrimaryContainer
-        : (c.icon === "gear" || c.icon === "overshoot") && c.on ? P.primary
-          : (c.type === "mode" ? P.dim : P.text);
+      : (press && solidPress) ? P.bg
+        : c.active ? P.onPrimaryContainer
+          : (c.icon === "gear" || c.icon === "overshoot") && c.on ? P.primary
+            : (c.type === "mode" ? P.dim : P.text);
     drawIcon(g, c.icon, c.x + c.w / 2, c.y + c.h / 2, c.type === "mode" ? 10 : 11, col, {
       filled: c.icon === "gear" ? !!c.on : !!c.active,
       on: !!c.on,
+      open: c.icon === "hamburger" ? S.toolsOpen !== false : false,
       // Only the gear reads the angle; building a Date for every icon every frame was wasted.
-      angle: c.icon === "gear" ? ((nowMs() / 1000) * 2.2) % (Math.PI * 2) : 0
+      angle: c.icon === "gear" && S.realtime ? ((nowMs() / 1000) * 2.2) % (Math.PI * 2) : 0
     });
   }
   function drawApply(g, c) {
@@ -1976,39 +2226,72 @@
     var pen = g.newPen(g.PenType.SOLID_COLOR, color, 1.6);
     var brush = g.newBrush(g.BrushType.SOLID_COLOR, color);
     if (kind === "gear") {
-      var i, a;
+      // A twelve-tooth cog with a real centre hole. Off = white outline; on = solid blue fill.
+      // The whole outline rotates through state.angle, so every tooth turns with the icon.
+      var teeth = 12, gearBase = finite(state.angle) ? state.angle : 0;
+      var step = Math.PI * 2 / teeth;
+      var outerR = r * 0.95, rootR = r * 0.66, holeR = r * 0.32;
+      var tipHalf = step * 0.13, valleyHalf = step * 0.24;
+      var gk, ga, gp = [], hp = [];
+      for (gk = 0; gk < teeth; gk++) {
+        ga = gearBase + gk * step;
+        gp.push([cx + Math.cos(ga - valleyHalf) * rootR, cy + Math.sin(ga - valleyHalf) * rootR]);
+        gp.push([cx + Math.cos(ga - tipHalf) * outerR, cy + Math.sin(ga - tipHalf) * outerR]);
+        gp.push([cx + Math.cos(ga + tipHalf) * outerR, cy + Math.sin(ga + tipHalf) * outerR]);
+        gp.push([cx + Math.cos(ga + valleyHalf) * rootR, cy + Math.sin(ga + valleyHalf) * rootR]);
+      }
+      // Inner circle in the opposite direction: with the non-zero fill rule it cuts the hole out.
+      for (gk = 0; gk < teeth; gk++) {
+        ga = gearBase - gk * step;
+        hp.push([cx + Math.cos(ga) * holeR, cy + Math.sin(ga) * holeR]);
+      }
+      g.newPath();
+      for (gk = 0; gk < gp.length; gk++) {
+        if (gk === 0) g.moveTo(gp[gk][0], gp[gk][1]); else g.lineTo(gp[gk][0], gp[gk][1]);
+      }
+      g.closePath();
+      for (gk = 0; gk < hp.length; gk++) {
+        if (gk === 0) g.moveTo(hp[gk][0], hp[gk][1]); else g.lineTo(hp[gk][0], hp[gk][1]);
+      }
+      g.closePath();
       if (state.filled) {
-        circle(g, cx, cy, r * 0.58, color, null, 0);
-        for (i = 0; i < 8; i++) {
-          a = Math.PI * 2 * i / 8;
-          line(g, cx + Math.cos(a) * r * 0.54, cy + Math.sin(a) * r * 0.54,
-            cx + Math.cos(a) * r * 0.94, cy + Math.sin(a) * r * 0.94, color, 5);
-        }
-        circle(g, cx, cy, r * 0.18, P.low, null, 0);
-        // A small orbiting notch makes the symmetric cog visibly spin while realtime is on.
-        if (finite(state.angle)) {
-          var gk;
-          for (gk = 2; gk >= 0; gk--) {
-            var ga = state.angle - gk * 0.16;
-            circle(g, cx + Math.cos(ga) * r * 0.4, cy + Math.sin(ga) * r * 0.4, gk === 0 ? 2.2 : 1.6,
-              gk === 0 ? P.low : withAlpha(P.low, 0.28), null, 0);
-          }
-        }
+        g.fillPath(brush);
+        g.strokePath(g.newPen(g.PenType.SOLID_COLOR, color, 1.1));
       } else {
-        circle(g, cx, cy, r * 0.56, null, color, 2.2);
-        for (i = 0; i < 8; i++) {
-          a = Math.PI * 2 * i / 8;
-          line(g, cx + Math.cos(a) * r * 0.58, cy + Math.sin(a) * r * 0.58,
-            cx + Math.cos(a) * r * 0.92, cy + Math.sin(a) * r * 0.92, color, 4);
-        }
-        circle(g, cx, cy, r * 0.18, null, color, 1.5);
+        g.strokePath(pen);
       }
       return;
     }
     if (kind === "hamburger") {
+      // Three lines + a caret: the button folds the tool rows in and out.
       for (var hb = -1; hb <= 1; hb++) {
-        line(g, cx - r * 0.5, cy + hb * r * 0.36, cx + r * 0.5, cy + hb * r * 0.36, color, 1.9);
+        line(g, cx - 9, cy + hb * r * 0.36, cx + 2, cy + hb * r * 0.36, color, 1.9);
       }
+      g.newPath();
+      if (state.open) {
+        g.moveTo(cx + 4.5, cy + 1.5);
+        g.lineTo(cx + 7, cy - 1.5);
+        g.lineTo(cx + 9.5, cy + 1.5);
+      } else {
+        g.moveTo(cx + 4.5, cy - 1.5);
+        g.lineTo(cx + 7, cy + 1.5);
+        g.lineTo(cx + 9.5, cy - 1.5);
+      }
+      g.strokePath(g.newPen(g.PenType.SOLID_COLOR, color, 1.5));
+      return;
+    }
+    if (kind === "star") {
+      var pts = [], si;
+      for (si = 0; si < 10; si++) {
+        var sa = -Math.PI / 2 + si * Math.PI / 5;
+        var sr = si % 2 ? r * 0.45 : r * 0.95;
+        pts.push([cx + Math.cos(sa) * sr, cy + Math.sin(sa) * sr]);
+      }
+      g.newPath();
+      g.moveTo(pts[0][0], pts[0][1]);
+      for (si = 1; si < 10; si++) g.lineTo(pts[si][0], pts[si][1]);
+      g.closePath();
+      g.strokePath(pen);
       return;
     }
     if (kind === "lang") {
@@ -2034,23 +2317,78 @@
       }
       return;
     }
+    if (kind === "reverse") {
+      // Two L-shaped arrows, diagonally mirrored: down-then-right and up-then-left, with a small
+      // rounded bend on each 90° corner.
+      g.newPath();
+      g.moveTo(cx - 8, cy - 8);
+      g.lineTo(cx - 8, cy + 4);
+      g.lineTo(cx - 6.5, cy + 6.5);
+      g.lineTo(cx - 4, cy + 8);
+      g.lineTo(cx + 1.5, cy + 8);
+      g.strokePath(pen);
+      line(g, cx + 1.5, cy + 8, cx - 2, cy + 5.5, color, 1.6);
+      line(g, cx + 1.5, cy + 8, cx - 2, cy + 10.5, color, 1.6);
+      g.newPath();
+      g.moveTo(cx + 8, cy + 8);
+      g.lineTo(cx + 8, cy - 4);
+      g.lineTo(cx + 6.5, cy - 6.5);
+      g.lineTo(cx + 4, cy - 8);
+      g.lineTo(cx - 1.5, cy - 8);
+      g.strokePath(pen);
+      line(g, cx - 1.5, cy - 8, cx + 2, cy - 5.5, color, 1.6);
+      line(g, cx - 1.5, cy - 8, cx + 2, cy - 10.5, color, 1.6);
+      return;
+    }
     if (kind === "import") {
-      strokeRound(g, cx - 10, cy - 10, 13, 13, 3, color, 1.5);
-      strokeRound(g, cx - 3, cy - 3, 13, 13, 3, color, 1.5);
+      // Copy/import: a back sheet at the bottom-left and a front document with a folded top-right
+      // corner and two text lines (the reference icon). The back sheet's bottom-right corner stays
+      // open (no upward tick) so it does not poke through the lower text line.
+      g.newPath();
+      g.moveTo(cx - 10.5, cy - 4);
+      g.lineTo(cx - 10.5, cy + 5.5);
+      g.lineTo(cx - 8, cy + 8.5);
+      g.lineTo(cx + 5, cy + 8.5);
+      g.strokePath(pen);
+      g.newPath();
+      g.moveTo(cx - 6, cy - 9);
+      g.lineTo(cx + 3.5, cy - 9);
+      g.lineTo(cx + 9, cy - 4);
+      g.lineTo(cx + 9, cy + 4);
+      g.lineTo(cx + 7.5, cy + 6);
+      g.lineTo(cx - 4.5, cy + 6);
+      g.lineTo(cx - 6, cy + 4);
+      g.lineTo(cx - 6, cy - 9);
+      g.strokePath(pen);
+      // folded corner
+      g.newPath();
+      g.moveTo(cx + 3.5, cy - 9);
+      g.lineTo(cx + 3.5, cy - 4);
+      g.lineTo(cx + 9, cy - 4);
+      g.strokePath(pen);
+      line(g, cx - 2, cy - 1.5, cx + 6, cy - 1.5, color, 1.4);
+      line(g, cx - 2, cy + 2, cx + 6, cy + 2, color, 1.4);
       return;
     }
     if (kind === "plus") { line(g, cx - 7, cy, cx + 7, cy, color, 1.8); line(g, cx, cy - 7, cx, cy + 7, color, 1.8); return; }
     if (kind === "minus") { line(g, cx - 7, cy, cx + 7, cy, color, 1.8); return; }
     if (kind === "smooth") {
+      // Smooth points show a Bézier curve; broken points keep the previous "straight segments"
+      // mark (the old smooth-state icon).
       g.newPath();
       if (state.filled) {
+        var b0x = cx - 7, b0y = cy + 5, b1x = cx - 3, b1y = cy + 5,
+          b2x = cx - 3, b2y = cy - 5, b3x = cx + 7, b3y = cy - 5, bk, bt, bmt;
+        for (bk = 0; bk <= 12; bk++) {
+          bt = bk / 12; bmt = 1 - bt;
+          var bx = bmt * bmt * bmt * b0x + 3 * bmt * bmt * bt * b1x + 3 * bmt * bt * bt * b2x + bt * bt * bt * b3x;
+          var by = bmt * bmt * bmt * b0y + 3 * bmt * bmt * bt * b1y + 3 * bmt * bt * bt * b2y + bt * bt * bt * b3y;
+          if (bk === 0) g.moveTo(bx, by); else g.lineTo(bx, by);
+        }
+      } else {
         g.moveTo(cx - 7, cy + 5);
         g.lineTo(cx - 3, cy + 5);
         g.lineTo(cx + 3, cy - 5);
-        g.lineTo(cx + 7, cy - 5);
-      } else {
-        g.moveTo(cx - 7, cy + 5);
-        g.lineTo(cx, cy);
         g.lineTo(cx + 7, cy - 5);
       }
       g.strokePath(pen);
@@ -2111,6 +2449,12 @@
       g.strokePath(pen);
     }
   }
+  function drawNewGroupChip(g, ng) {
+    if (!ng) return;
+    var hov = hoverId === ng.id, press = pressedId === ng.id;
+    if (hov || press) fillRound(g, ng.x, ng.y, ng.w, ng.h, ng.h / 2, press ? P.highest : P.high);
+    drawIcon(g, ng.icon || "plus", ng.x + ng.w / 2, ng.y + ng.h / 2, 8, hov || press ? P.text : P.dim, {});
+  }
   function drawPresets(g, lay) {
     var pl = lay.presetLayout, r = lay.preset, list = pl.list;
     var listBottom = list.y + list.h;
@@ -2118,7 +2462,8 @@
     // 1) Draw full cells first; the mask below clips them exactly at the list edges, so 1px
     // of a preview/name is still painted when it crosses the viewport border.
     if (pl.selectedGroup && !pl.cells.length) {
-      textBox(g, T("这个组还没有预设 · 点“保存”"), pl.emptyRect.x, pl.emptyRect.y, pl.emptyRect.w, pl.emptyRect.h,
+      textBox(g, TR("这个组还没有预设 · 点右上角 ☆ 保存", "No presets in this group · Click ☆ above to save"),
+        pl.emptyRect.x, pl.emptyRect.y, pl.emptyRect.w, pl.emptyRect.h,
         10, P.faint, "left", "REGULAR");
     }
     for (i = 0; i < pl.cells.length; i++) {
@@ -2136,11 +2481,7 @@
       textBox(g, presetDisplayName(pr), cell.rect.x, sy + sq + 2, cell.rect.w, 15, 9,
         isSel ? P.onPrimaryContainer : P.text, "center", "REGULAR", cell.rect.w);
     }
-    // 2) Fixed header and group chips (the panel background itself stays unpainted).
-    textBox(g, T("预设库"), r.x + 2, r.y, 70, 26, 10, P.dim, "left", "REGULAR");
-    drawPill(g, pl.save);
-    drawPill(g, pl.newGroup);
-    // 3) Horizontal group chips, width follows the label.
+    // 2) Group chips, width follows the label, then the "+" that adds a group.
     for (i = 0; i < pl.chips.length; i++) {
       var ch = pl.chips[i];
       var sel = ch.group.id === S.selectedGroupId;
@@ -2148,6 +2489,25 @@
       if (sel || hov) fillRound(g, ch.x, ch.y, ch.w, ch.h, ch.h / 2, sel ? P.primaryContainer : P.highest);
       textBox(g, groupDisplayName(ch.group), ch.x + 7, ch.y, ch.w - 14, ch.h, 10,
         sel ? P.onPrimaryContainer : P.text, "center", "REGULAR", ch.w - 14);
+    }
+    drawNewGroupChip(g, pl.newGroup);
+    // Drag feedback: highlight the group chip a preset would join, or show the insertion line
+    // between two preset cells.
+    if (drag && drag.kind === "preset" && drag.active && drag.drop) {
+      if (drag.drop.kind === "group") {
+        for (i = 0; i < pl.chips.length; i++) {
+          if (pl.chips[i].group.id !== drag.drop.group.id) continue;
+          var dch = pl.chips[i];
+          strokeRound(g, dch.x + 1, dch.y + 1, dch.w - 2, dch.h - 2, (dch.h - 2) / 2, P.primary, 2);
+          break;
+        }
+      } else if (pl.cells.length) {
+        var dcell = pl.cells[Math.min(drag.drop.index, pl.cells.length - 1)];
+        var dlineX = drag.drop.index >= pl.cells.length ? dcell.rect.x + dcell.rect.w + 2 : dcell.rect.x - 2;
+        if (dcell.rect.y >= list.y && dcell.rect.y + dcell.rect.h <= listBottom) {
+          line(g, dlineX, dcell.rect.y + 2, dlineX, dcell.rect.y + dcell.rect.h - 2, P.primary, 2.5);
+        }
+      }
     }
     // 4) Scrollbar above the mask.
     if (pl.scrollbar) {
@@ -2176,6 +2536,53 @@
     menu = null;
     redraw(true);
   }
+  // The hamburger folds the tool buttons away; Apply and the save star stay visible. Right-click
+  // (or the settings menu) still reaches language and the write-on-release switch.
+  function toggleTools() {
+    S.toolsOpen = S.toolsOpen !== true;
+    hoverId = null;
+    pressedId = null;
+    saveState();
+    st(S.toolsOpen ? "工具栏已展开（点 ☰ 收起）" : "工具栏已收起（点 ☰ 展开，右键设置）",
+      S.toolsOpen ? "Tools shown (click ☰ to fold)" : "Tools folded (click ☰ to show, right-click for settings)");
+  }
+  function setPresetSide(side) {
+    S.presetSide = (side === "left" || side === "right") ? side : "top";
+    presetLayoutCache = null;
+    saveState();
+    redraw(true);
+    var W = L ? L.W : FIXED_W;
+    var contentW = W - 16;
+    var sideW = clamp(Math.round(contentW * 0.42), 160, 320);
+    var editorW = contentW - sideW - 10;
+    if (S.presetSide !== "top" && (editorW < 190 || sideW < 150)) {
+      st("面板太窄，预设库暂时仍显示在上侧；把停靠区拉宽后生效",
+        "Panel is too narrow; presets stay on top until the dock is wider");
+    } else {
+      st(S.presetSide === "top" ? "预设库位置：上侧" : (S.presetSide === "left" ? "预设库位置：左侧" : "预设库位置：右侧"),
+        S.presetSide === "top" ? "Presets: top" : (S.presetSide === "left" ? "Presets: left" : "Presets: right"));
+    }
+  }
+  function openToolVisibilityMenu(x, y) {
+    if (!S.toolVisible) S.toolVisible = {};
+    var items = [{ header: true, label: T("工具显示") }], i;
+    for (i = 0; i < TOOL_VISIBILITY.length; i++) {
+      (function (id) {
+        items.push({
+          label: (toolVisible(id) ? "✓ " : "") + toolLabel(id),
+          action: function () {
+            S.toolVisible[id] = !toolVisible(id);
+            saveState();
+            openToolVisibilityMenu(x, y);
+          }
+        });
+      })(TOOL_VISIBILITY[i].id);
+    }
+    items.push({ header: true, label: "" });
+    items.push({ label: T("返回设置"), action: function () { openSettingsMenu(x, y); } });
+    menu = { x: x, y: y, w: Math.min(230, (L ? L.W : 600) - 16), items: items };
+    redraw(true);
+  }
   function openSettingsMenu(x, y) {
     // 1.0.13: the globe moved in here, and the live-write mode switch joined it. With it on, a
     // drag only previews and the timeline is written when the pointer is released.
@@ -2183,6 +2590,23 @@
       { header: true, label: T("设置") },
       { label: (en() ? "✓ " : "") + "English", action: function () { setLanguage("en"); } },
       { label: (!en() ? "✓ " : "") + "中文", action: function () { setLanguage("zh"); } },
+      { header: true, label: T("预设库位置") },
+      { label: ((S.presetSide || "top") === "top" ? "✓ " : "") + T("上侧"), action: function () { setPresetSide("top"); } },
+      { label: (S.presetSide === "left" ? "✓ " : "") + T("左侧"), action: function () { setPresetSide("left"); } },
+      { label: (S.presetSide === "right" ? "✓ " : "") + T("右侧"), action: function () { setPresetSide("right"); } },
+      { header: true, label: T("编辑器") },
+      {
+        label: (S.onlySelectedHandles ? "✓ " : "") + T("只显示选中点的操纵杆"),
+        action: function () {
+          S.onlySelectedHandles = !S.onlySelectedHandles;
+          saveState();
+          st(S.onlySelectedHandles ? "操纵杆：只显示选中点" : "操纵杆：所有点都显示",
+            S.onlySelectedHandles ? "Levers: selected point only" : "Levers: all points");
+        }
+      },
+      { header: true, label: T("工具栏") },
+      { label: (S.toolsOpen !== false ? "✓ " : "") + T("显示工具栏"), action: toggleTools },
+      { label: T("工具显示…"), action: function () { openToolVisibilityMenu(x, y); } },
       { header: true, label: T("实时写入模式") },
       {
         label: (S.writeOnRelease ? "✓ " : "") + T("停止拖动后写入"),
@@ -2199,10 +2623,18 @@
   }
   function menuLayout(g) {
     if (!menu) return null;
-    var itemH = 28, headerH = 22, pad = 6, w = menu.w || 210, h = pad * 2, i;
-    for (i = 0; i < menu.items.length; i++) h += menu.items[i].header ? headerH : itemH;
-    var x = clamp(menu.x, 8, (L ? L.W : 600) - w - 8);
-    var y = clamp(menu.y, 8, (L ? L.H : 780) - h - 8);
+    var W = L ? L.W : 600, H = L ? L.H : 780;
+    var itemH = 28, headerH = 22, pad = 6, w = Math.min(menu.w || 210, W - 16), h, i;
+    function measure() {
+      var total = pad * 2;
+      for (var mi = 0; mi < menu.items.length; mi++) total += menu.items[mi].header ? headerH : itemH;
+      return total;
+    }
+    h = measure();
+    if (h > H - 16) { itemH = 22; headerH = 18; h = measure(); }
+    if (h > H - 16) { itemH = 18; headerH = 16; h = measure(); }
+    var x = clamp(menu.x, 8, Math.max(8, W - w - 8));
+    var y = clamp(menu.y, 8, Math.max(8, H - h - 8));
     var rect = { x: x, y: y, w: w, h: h };
     menu.rect = rect;
     var cy = y + pad, items = [];
@@ -2228,13 +2660,16 @@
         continue;
       }
       if (hoverId === "menu:" + i) fillRound(g, it.rect.x, it.rect.y, it.rect.w, it.rect.h, 11, P.highest);
-      textBox(g, it.label, it.rect.x + 12, it.rect.y, it.rect.w - 24, it.rect.h, 11, it.danger ? P.danger : P.text, "left", "REGULAR");
+      textBox(g, it.label, it.rect.x + 12, it.rect.y, it.rect.w - 24, it.rect.h, 11,
+        it.disabled ? P.faint : (it.danger ? P.danger : P.text), "left", "REGULAR");
     }
   }
 
   // ---------------------------------------------------------------- presets: actions
   function loadPreset(group, preset, applyNow) {
+    var wasMulti = isMulti();
     S.anchors = cloneAnchors(preset.anchors);
+    enforceEndpoints(S.anchors);
     S.selectedAnchor = 0;
     S.selectedPreset = { groupId: group.id, presetId: preset.id };
     // Detect overshoot before completing handles: ensureMultiHandles() clamps y to 0..1 when the
@@ -2250,9 +2685,12 @@
       if (outside) S.allowOvershoot = true;
     }
     if (S.anchors.length > 2) ensureMultiHandles(S.anchors);
-    if (!S.allowOvershoot) clampAllAnchors();
+    clampAllAnchors();
     saveState();
-    if (applyNow || (S.realtime && !isMulti())) {
+    // Realtime auto-write is only for switching between single-segment curves. Coming from a
+    // multi-point curve (or loading a multi-point preset), a single click is a preview: the user
+    // may be about to click √ or compare presets, and silently rebuilding the keys is destructive.
+    if (applyNow || (S.realtime && !wasMulti && !isMulti())) {
       applyCurrent(false);
     } else {
       status(TR("已加载预设“" + presetDisplayName(preset) + "”，点 √ 写入关键帧",
@@ -2292,20 +2730,36 @@
     for (i = 0; i < names.length; i++) if (names[i] === res.group) { gname = values[i]; break; }
     if (!pname) { st("预设名称不能为空", "Preset name cannot be empty"); return; }
     var grp = null;
-    for (i = 0; i < S.userGroups.length; i++) if (S.userGroups[i].name.toLowerCase() === gname.toLowerCase()) grp = S.userGroups[i];
-    if (!grp) {
-      grp = { id: makeId("g"), name: gname || "我的预设", presets: [] };
-      S.userGroups.push(grp);
+    if (gname) {
+      for (i = 0; i < S.userGroups.length; i++) if (S.userGroups[i].name.toLowerCase() === gname.toLowerCase()) grp = S.userGroups[i];
+      if (!grp) {
+        grp = { id: makeId("g"), name: gname, presets: [] };
+        S.userGroups.push(grp);
+      }
+    } else {
+      // No explicit "new group name": stay in the group selected in the panel (or the first
+      // group). Never create an extra group just because the dropdown reply was empty.
+      for (i = 0; i < S.userGroups.length; i++) if (S.userGroups[i].id === S.selectedGroupId) grp = S.userGroups[i];
+      if (!grp && S.userGroups.length) grp = S.userGroups[0];
+      if (!grp) {
+        grp = { id: makeId("g"), name: TR("我的预设", "My Presets"), presets: [] };
+        S.userGroups.push(grp);
+      }
     }
     var existing = null;
     for (i = 0; i < grp.presets.length; i++) if (grp.presets[i].name.toLowerCase() === pname.toLowerCase()) existing = grp.presets[i];
     if (existing) {
       existing.anchors = cloneAnchors(S.anchors);
+      S.selectedPreset = { groupId: grp.id, presetId: existing.id };
       status(TR("已替换预设“" + pname + "”", "Replaced preset “" + pname + "”"));
     } else {
-      grp.presets.push({ id: makeId("p"), name: pname, anchors: cloneAnchors(S.anchors), multi: S.anchors.length > 2 });
+      var saved = { id: makeId("p"), name: pname, anchors: cloneAnchors(S.anchors), multi: S.anchors.length > 2 };
+      grp.presets.push(saved);
+      S.selectedPreset = { groupId: grp.id, presetId: saved.id };
       status(TR("已保存预设“" + pname + "”到“" + groupDisplayName(grp) + "”", "Saved preset “" + pname + "” to “" + groupDisplayName(grp) + "”"));
     }
+    S.selectedGroupId = grp.id;
+    S.scroll = 0;
     S.collapsed[grp.id] = false;
     saveState();
     redraw();
@@ -2492,9 +2946,8 @@
     if (defaultGroup && groupNames.length) {
       for (var i = 0; i < groupNames.length; i++) if (groupNames[i] === defaultGroup) drop.selection = i;
     }
-    var newGroup = addRow(T("新建组名"), "edittext", "");
-    newGroup.characters = 24;
-    newGroup.helpTip = T("填写后会新建这个组；留空则使用上方所选组");
+    // Only the preset name and the target group: creating a group happens from the "+" group slot
+    // in the presets row, so this dialog can never put the typed name into a new group by accident.
     var buttons = dlg.add("group");
     buttons.alignment = ["fill", "top"];
     buttons.alignChildren = ["right", "center"];
@@ -2503,16 +2956,17 @@
     var ok = buttons.add("button", undefined, T("保存"), { name: "ok" });
     cancel.preferredSize = [82, 26];
     ok.preferredSize = [82, 26];
-    dlg.preferredSize = [338, 214];
+    dlg.preferredSize = [338, 180];
     var out = null;
     ok.onClick = function () {
-      var g = String(newGroup.text || "");
       var list = drop.items;
-      var selected = drop.selection ? drop.selection.text : (list.length ? list[0].text : "我的预设");
-      out = { name: name.text, group: g ? g : selected };
+      var selItem = drop.selection;
+      var selected = selItem && selItem.text ? selItem.text : (list.length ? list[0].text : T("我的预设"));
+      out = { name: name.text, group: selected };
       dlg.close(1);
     };
     cancel.onClick = function () { dlg.close(0); };
+    try { name.active = true; } catch (e) {}
     dlg.show();
     return out;
   }
@@ -2534,9 +2988,8 @@
       if (x >= L.W - 6) return { kind: "resize", edge: "e" };
       if (y >= L.H - 6) return { kind: "resize", edge: "s" };
     }
-    // Choose the closest anchor/handle, with a tiny bias towards anchors. A handle clamped at
-    // the viewport edge can sit very close to its point; always preferring anchors made that
-    // lever impossible to grab, so the user could only move the point up/down.
+    // Choose the closest anchor/handle; on a tie the handle wins, because a lever dragged onto its
+    // point collapses exactly there and the handle dot is drawn above the anchor.
     var i, bestAnchor = null, bestHandle = null, bestAD = 1e9, bestHD = 1e9;
     for (i = 0; i < L.anchors.length; i++) {
       var a = L.anchors[i];
@@ -2548,14 +3001,15 @@
       var dx = x - h.x, dy = y - h.y, hd = dx * dx + dy * dy;
       if (hd <= h.r * h.r && hd < bestHD) { bestHD = hd; bestHandle = h; }
     }
-    if (bestHandle && (!bestAnchor || bestHD + 4 < bestAD)) return bestHandle;
+    // A collapsed lever sits exactly on its point; let the handle win ties (the dot is painted
+    // above the anchor), otherwise pick whichever hit is closer.
+    if (bestHandle && (!bestAnchor || bestHD <= bestAD)) return bestHandle;
     if (bestAnchor) return bestAnchor;
     if (bestHandle) return bestHandle;
     // preset area (before the generic control list, so rows/headers keep their kinds)
     var pl = L.presetLayout;
     if (pl && pointInRect(x, y, L.preset)) {
-      if (pointInRect(x, y, pl.save.rect)) return pl.save;
-      if (pointInRect(x, y, pl.newGroup.rect)) return pl.newGroup;
+      if (pl.newGroup && pointInRect(x, y, pl.newGroup.rect)) return pl.newGroup;
       if (pl.scrollbar && pointInRect(x, y, { x: pl.scrollbar.x, y: pl.scrollbar.y, w: pl.scrollbar.w, h: pl.scrollbar.h })) return { kind: "scrollbar", rect: pl.scrollbar };
       for (i = 0; i < pl.chips.length; i++) {
         if (pointInRect(x, y, pl.chips[i].rect)) return { kind: "groupChip", group: pl.chips[i].group, chip: pl.chips[i] };
@@ -2586,7 +3040,27 @@
   }
 
   // ---------------------------------------------------------------- interactions
+  // 0.19.0 sends every MouseEvent with `buttons` (DOM bitmask: 1 left, 2 right, 4 middle) and keeps
+  // routing moves and the release to the control the press started on, even outside the window.
+  // Old builds have neither, so the mouseout fallback below stays for them.
+  function noteButtons(e) {
+    if (pointerHasButtons === null) pointerHasButtons = (typeof e.buttons === "number");
+  }
+  // EffectCraft 0.19's ScriptUI delivers mouse events only (no keydown/keyup and a static
+  // keyboardState), so Delete cannot be captured there. Register it anyway for hosts that do
+  // deliver key events; Alt+click and the point's context menu are the usable shortcuts.
+  function canvasKeyDown(e) {
+    var key = String((e && (e.key || e.keyName)) || "");
+    var code = e && e.keyCode;
+    if (key === "Delete" || key === "Backspace" || key === "Del" || code === 46 || code === 8) {
+      if (e && e.preventDefault) e.preventDefault();
+      deleteAnchor();
+      return false;
+    }
+  }
   function canvasMouseDown(e) {
+    noteButtons(e);
+    pressedHeld = (typeof e.buttons === "number") && e.buttons !== 0;
     var themed = refreshTheme();
     if (themed && !drag) redraw();
     if (e.button === 2) {
@@ -2603,19 +3077,41 @@
     }
     var hit = hitTest(e.clientX, e.clientY);
     if (!hit) return;
+    // Alt+click is the mouse shortcut for deleting a middle point (Delete key is unavailable in
+    // ScriptUI); endpoints are protected by deleteAnchor().
+    if (hit.kind === "anchor" && e.altKey) {
+      S.selectedAnchor = hit.i;
+      deleteAnchor();
+      return;
+    }
     if (hit.kind === "resize") {
       drag = { kind: "resize", edge: hit.edge, w0: win.size.width, h0: win.size.height, x0: e.clientX, y0: e.clientY, lastT: 0, t0: nowMs() };
       return;
     }
     if (hit.kind === "handle") {
       S.selectedAnchor = hit.i;
-      drag = { kind: "handle", i: hit.i, side: hit.side, moved: false, t0: nowMs() };
+      var handleAnchor = S.anchors[hit.i];
+      var otherHandle = hit.side === "hOut" ? handleAnchor.hIn : handleAnchor.hOut;
+      drag = {
+        kind: "handle", i: hit.i, side: hit.side, moved: false, t0: nowMs(),
+        // Remember the other lever's length once. Recomputing it after each clamp made it grow
+        // while the dragged lever rotated a smooth point.
+        otherLen0: otherHandle ? dist(otherHandle, handleAnchor) : 0
+      };
       liveMode = S.realtime;
       return;
     }
     if (hit.kind === "anchor") {
       S.selectedAnchor = hit.i;
+      if (hit.i === 0 || hit.i === S.anchors.length - 1) {
+        // The endpoints are the (0,0) and (1,1) anchors; only their levers may move.
+        st("首尾点固定在 (0,0) / (1,1)，不能移动；可以拖它的操纵杆",
+          "The first/last points are fixed at (0,0) / (1,1); drag their levers instead");
+        redraw();
+        return;
+      }
       var anchor0 = S.anchors[hit.i];
+      st("已选中点 · Alt+单击 或右键“删除这个点”", "Point selected · Alt-click or right-click to delete it");
       drag = {
         kind: "anchor", i: hit.i, x0: e.clientX, y0: e.clientY,
         ax: anchor0.x, ay: anchor0.y,
@@ -2641,10 +3137,13 @@
     if (hit.kind === "preset") {
       S.selectedPreset = { groupId: hit.group.id, presetId: hit.preset.id };
       // Load on press: a click always loads the curve even if the host later reports a stray
-      // pointer movement; dragging the row then reorders it. Built-in presets are read-only and
-      // are rebuilt on every launch, so they never start a reorder drag.
+      // pointer movement; dragging the row then reorders it or moves it to another group.
       loadPreset(hit.group, hit.preset, false);
       pressedId = idOf(hit);
+      drag = {
+        kind: "preset", group: hit.group, preset: hit.preset,
+        x0: e.clientX, y0: e.clientY, active: false, drop: null, t0: nowMs()
+      };
       redraw();
       return;
     }
@@ -2666,7 +3165,14 @@
   }
 
   function canvasMouseMove(e) {
+    noteButtons(e);
+    if (e.buttons) pressedHeld = true;
     if (drag) {
+      // 0.19 keeps sending moves while a button is held, but if the release itself was lost (the
+      // pointer left the native window and the platform stopped reporting it), the next move
+      // arrives with buttons === 0. Finish the drag where the pointer is instead of leaving it
+      // stuck until the pointer comes back.
+      if (pointerHasButtons && e.buttons === 0 && pressedHeld) { finishDrag(e); pressedHeld = false; return; }
       // Synthetic mouse commands (and the real pointer settling right after a press) must not turn
       // a click into a drag. A real drag produces several mousemove events a few frames later.
       drag.moves = (drag.moves || 0) + 1;
@@ -2710,10 +3216,14 @@
           if (a.smooth && drag.i > 0 && drag.i < S.anchors.length - 1) {
             var other = drag.side === "hOut" ? a.hIn : a.hOut;
             if (other) {
-              var lenOther = Math.sqrt((other.x - a.x) * (other.x - a.x) + (other.y - a.y) * (other.y - a.y)) || 0.15;
-              var dx = h.x - a.x, dy = h.y - a.y, len = Math.sqrt(dx * dx + dy * dy) || 0.15;
-              other.x = a.x - dx / len * lenOther;
-              other.y = a.y - dy / len * lenOther;
+              var lenOther = finite(drag.otherLen0) ? drag.otherLen0 : 0;
+              var dx = h.x - a.x, dy = h.y - a.y, len = Math.sqrt(dx * dx + dy * dy);
+              if (len > 1e-6 && lenOther > 1e-6) {
+                other.x = a.x - dx / len * lenOther;
+                other.y = a.y - dy / len * lenOther;
+              }
+              // At exactly zero length there is no direction to mirror; leave the other lever where
+              // it is instead of collapsing it onto the point.
             }
           }
           clampAnchorHandles(drag.i);
@@ -2791,6 +3301,11 @@
   }
 
   function canvasMouseUp(e) {
+    noteButtons(e);
+    finishDrag(e);
+    pressedHeld = false;
+  }
+  function finishDrag(e) {
     if (drag) {
       if (drag.kind === "resize") {
         // Apply the final pointer position even if the last move was throttled.
@@ -2807,9 +3322,15 @@
       if (drag.kind === "scrollbar") { saveState(); drag = null; redraw(true); return; }
       if (drag.kind === "group") {
         if (drag.active) {
-          applyGroupDrop(drag.group, groupDropTarget(e.clientX, e.clientY));
+          // 0.19 delivers the release even when it happens far outside the panel, so a drop that
+          // ends outside the preset area cancels instead of moving the group to the end.
+          var nearPreset = L && pointInRect(e.clientX, e.clientY, {
+            x: L.preset.x - 8, y: L.preset.y - 8, w: L.preset.w + 16, h: L.preset.h + 16
+          });
+          if (nearPreset) applyGroupDrop(drag.group, groupDropTarget(e.clientX, e.clientY));
+          else st("已取消预设组排序", "Preset group order unchanged");
           draggedGroup = null;
-          st("预设组顺序已更新", "Preset group order updated");
+          if (nearPreset) st("预设组顺序已更新", "Preset group order updated");
           saveState();
         } else {
           S.selectedGroupId = drag.group.id;
@@ -2848,8 +3369,6 @@
         if (drag.active) {
           applyPresetDrop(drag);
           draggedPreset = null;
-          st("已调整预设顺序", "Preset order changed");
-          saveState();
         } else {
           var now = nowMs();
           var clickId = "preset:" + drag.group.id + ":" + drag.preset.id;
@@ -2872,10 +3391,32 @@
     }
   }
 
+  // The pointer left the canvas. 0.19 keeps the capture (moves and the release continue to arrive
+  // with negative or past-the-edge clientX/clientY), so the drag survives; older hosts have no
+  // capture, so a drag left running there would follow plain hover after the lost mouseup.
+  function canvasMouseOut(e) {
+    noteButtons(e);
+    if (drag) {
+      if (!pointerHasButtons) {
+        if (drag.kind === "resize" && win) { S.size = [win.size.width, win.size.height]; saveState(); }
+        else if (drag.kind === "scrollbar" || drag.kind === "presetPan") saveState();
+        else if (drag.kind === "handle" || drag.kind === "anchor") { endLiveGroup(); liveMode = false; }
+        else if (drag.kind === "group") draggedGroup = null;
+        else if (drag.kind === "preset") draggedPreset = null;
+        drag = null; pressedId = null; hoverId = null; redraw(true);
+        pressedHeld = false;
+        return;
+      }
+      pressedId = null; hoverId = null; redraw();
+      return;
+    }
+    hoverId = null; redraw();
+  }
+
   function activate(hit, x, y) {
     var id = idOf(hit);
     if (!id) return;
-    if (id === "icon:settings") { openSettingsMenu(x || 0, y || 0); return; }
+    if (id === "icon:settings") { toggleTools(); return; }
     if (id === "icon:overshoot") {
       S.allowOvershoot = !S.allowOvershoot;
       if (!S.allowOvershoot) clampAllAnchors();
@@ -2899,6 +3440,7 @@
       redraw(); return;
     }
     if (id === "icon:import") { importCurve(); return; }
+    if (id === "icon:reverse") { reverseCurve(); return; }
     if (id === "icon:add") { addAnchor(); return; }
     if (id === "icon:del") { deleteAnchor(); return; }
     if (id === "icon:smooth") { toggleSmooth(); return; }
@@ -2922,7 +3464,26 @@
 
   function openContextFor(hit, x, y) {
     if (menu) { closeMenu(); return; }
+    if (hit && hit.id === "icon:settings") { openSettingsMenu(x, y); return; }
     if (!hit) return;
+    if (hit.kind === "anchor") {
+      var ai = hit.i, alast = S.anchors.length - 1, canDel = ai > 0 && ai < alast;
+      S.selectedAnchor = ai;
+      menu = {
+        x: x, y: y, w: 200, items: [
+          { header: true, label: TR("关键帧点", "Keyframe point") },
+          {
+            label: TR("删除这个点", "Delete this point"), danger: true, disabled: !canDel,
+            action: function () { if (!canDel) return; S.selectedAnchor = ai; deleteAnchor(); }
+          },
+          {
+            label: TR("平滑 / 折断", "Smooth / broken"), disabled: ai <= 0 || ai >= alast || !isMulti(),
+            action: function () { S.selectedAnchor = ai; toggleSmooth(); }
+          }
+        ]
+      };
+      redraw(); return;
+    }
     if (hit.kind === "preset") {
       // Every group is editable now (the built-ins are migrated into user groups), so one menu
       // covers loading, updating from the current curve, renaming, duplicating and deleting.
@@ -2978,29 +3539,58 @@
     };
   }
 
-  // preset drag & drop
+  // Where a dragged preset would land: a group chip moves it to that group (append), the preset
+  // grid reorders it (insert before/after the cell under the pointer).
   function computePresetDrop(x, y, group) {
-    var pl = L.presetLayout, rows = pl.rows, best = null, bestDist = 1e9, i;
-    for (i = 0; i < rows.length; i++) {
-      var r = rows[i];
-      if (r.group !== group) continue;
-      var mid = r.rect.y + r.rect.h / 2;
-      var d = Math.abs(y - mid);
-      if (d < bestDist) { bestDist = d; best = { group: group, index: r.index, y: y < mid ? r.rect.y : r.rect.y + r.rect.h + 2 }; }
+    var pl = L && L.presetLayout, i;
+    if (!pl) return null;
+    for (i = 0; i < pl.chips.length; i++) {
+      var ch = pl.chips[i];
+      if (pointInRect(x, y, ch.rect)) {
+        if (ch.group.id === group.id) return null;
+        return { kind: "group", group: ch.group };
+      }
     }
-    return best;
+    if (!pointInRect(x, y, pl.list)) return null;
+    var rowH = pl.cellH + 6;
+    var localY = y - pl.list.y + (S.scroll | 0);
+    var row = Math.max(0, Math.floor(localY / rowH));
+    var localX = x - (pl.list.x + 4);
+    var col = Math.max(0, Math.min(pl.cols - 1, Math.floor(localX / pl.cellW)));
+    var index = row * pl.cols + col;
+    // Dropping on the right half of a cell inserts after it.
+    var cellLeft = pl.list.x + 4 + col * pl.cellW;
+    if (x - cellLeft > pl.cellW / 2) index++;
+    return { kind: "index", index: clamp(index, 0, group.presets.length) };
   }
   function applyPresetDrop(drag) {
     var drop = drag.drop;
-    if (!drop) return;
-    var group = drop.group, list = group.presets, from = -1, i;
-    for (i = 0; i < list.length; i++) if (list[i] === drag.preset) { from = i; break; }
-    if (from < 0) return;
-    var to = clamp(drop.index, 0, list.length);
-    list.splice(from, 1);
-    if (to > from) to--;
-    to = clamp(to, 0, list.length);
-    list.splice(to, 0, drag.preset);
+    if (!drop || !drag.group || !drag.preset) { st("已取消拖动", "Drag cancelled"); return; }
+    var group = drag.group, preset = drag.preset;
+    if (drop.kind === "group") {
+      if (drop.group.id === group.id) return;
+      var from = group.presets.indexOf(preset);
+      if (from >= 0) group.presets.splice(from, 1);
+      drop.group.presets.push(preset);
+      S.collapsed[drop.group.id] = false;
+      S.selectedGroupId = drop.group.id;
+      S.scroll = 0;
+      S.selectedPreset = { groupId: drop.group.id, presetId: preset.id };
+      status(TR("已把预设“" + presetDisplayName(preset) + "”移动到“" + groupDisplayName(drop.group) + "”",
+        "Moved preset “" + presetDisplayName(preset) + "” to “" + groupDisplayName(drop.group) + "”"));
+    } else {
+      var list = group.presets, fi = list.indexOf(preset), to = drop.index;
+      if (fi < 0) return;
+      list.splice(fi, 1);
+      if (to > fi) to--;
+      to = clamp(to, 0, list.length);
+      list.splice(to, 0, preset);
+      S.selectedPreset = { groupId: group.id, presetId: preset.id };
+      status(TR("已调整预设顺序", "Preset order changed"));
+    }
+    presetLayoutCache = null;
+    saveState();
+    redraw();
   }
 
   // Import 3+ selected keys as multi-point keyframe points (each point = one keyframe).
@@ -3032,16 +3622,50 @@
       pts.push({ x: clamp((tt - t0) / (t1 - t0), 0, 1), y: y, hIn: null, hOut: null, smooth: false });
     }
     pts[0].x = 0; pts[pts.length - 1].x = 1;
+    // Read each segment's real temporal ease instead of falling back to the default 1/3 levers.
+    // readPairCurve returns the cubic control points (x1,y1 for the out side, x2,y2 for the in side)
+    // normalised to that segment; map them into the two anchors that own them.
+    for (j = 0; j + 1 < pts.length; j++) {
+      var seg = null;
+      try { seg = readPairCurve(p, keys[j]); } catch (e) { seg = null; }
+      if (!seg) continue;
+      var pa = pts[j], pb = pts[j + 1], dx = pb.x - pa.x, dy = pb.y - pa.y;
+      pa.hOut = { x: pa.x + seg.x1 * dx, y: pa.y + seg.y1 * dy };
+      pb.hIn = { x: pa.x + seg.x2 * dx, y: pa.y + seg.y2 * dy };
+      if (pa.hOut.y < 0 || pa.hOut.y > 1 || pb.hIn.y < 0 || pb.hIn.y > 1) outside = true;
+    }
     S.anchors = pts;
+    // Enable overshoot before ensureMultiHandles/clamp: those clamp y to 0..1 while the switch is
+    // off, which used to flatten imported bounce handles that live outside 0..1.
+    if (outside) S.allowOvershoot = true;
     ensureMultiHandles(S.anchors);
     S.selectedAnchor = 0;
-    if (outside) S.allowOvershoot = true;
-    if (!S.allowOvershoot) clampAllAnchors();
+    clampAllAnchors();
     saveState();
     status(TR("已读取 " + pts.length + " 个关键帧作为多点曲线（每个点=一个关键帧）",
       "Imported " + pts.length + " keyframes as a multi-point curve (each point is a keyframe)"));
     redraw();
     return true;
+  }
+  // Reverse the whole curve: mirror time and value (x,y -> 1-x,1-y), reverse the point order,
+  // and swap each point's incoming/outgoing levers. Endpoints stay at (0,0)/(1,1).
+  function reverseCurve() {
+    var a = S.anchors, n = a.length, out = [], i;
+    for (i = n - 1; i >= 0; i--) {
+      var src = a[i];
+      var dst = { x: 1 - src.x, y: 1 - src.y, smooth: src.smooth !== false };
+      if (src.hOut) dst.hIn = { x: 1 - src.hOut.x, y: 1 - src.hOut.y };
+      if (src.hIn) dst.hOut = { x: 1 - src.hIn.x, y: 1 - src.hIn.y };
+      out.push(dst);
+    }
+    S.anchors = out;
+    enforceEndpoints(S.anchors);
+    if (S.anchors.length > 2) ensureMultiHandles(S.anchors);
+    S.selectedAnchor = clamp(n - 1 - (S.selectedAnchor | 0), 0, n - 1);
+    clampAllAnchors();
+    saveState();
+    st("已反转曲线（点 √ 写入）", "Curve reversed (click √ to write)");
+    redraw();
   }
   function importCurve() {
     // 3+ selected keys -> import their value curve as multi-point keyframes.
@@ -3056,7 +3680,7 @@
     S.selectedAnchor = 0;
     var outside = c.y1 < 0 || c.y1 > 1 || c.y2 < 0 || c.y2 > 1;
     if (outside) S.allowOvershoot = true;
-    if (!S.allowOvershoot) clampAllAnchors();
+    clampAllAnchors();
     saveState();
     status(en()
       ? "Read " + (c.count > 1 ? "the average of " : "") + c.count + " adjacent key pair" + (c.count === 1 ? "" : "s") + (outside ? " (values outside the boundary)" : "")
@@ -3089,6 +3713,9 @@
 
   function onDraw() {
     var g = this.graphics, W = this.size.width, H = this.size.height;
+    // Before the first layout pass the canvas can report 0x0; paint the normal panel size until it
+    // has a real one (a docked panel then repaints through onResize with the dock's size).
+    if (!(W > 1) || !(H > 1)) { W = FIXED_W; H = FIXED_H; }
     L = buildLayout(g, W, H);
     drawEditor(g, L);
     drawFunction(g, L);
@@ -3105,19 +3732,9 @@
     c.addEventListener("mousedown", canvasMouseDown);
     c.addEventListener("mousemove", canvasMouseMove);
     c.addEventListener("mouseup", canvasMouseUp);
-    c.addEventListener("mouseout", function () {
-      if (drag) {
-        // Never leave a resize/scroll drag alive after the pointer leaves the canvas: that made
-        // the border keep moving on plain hover once the mouseup happened outside.
-        if (drag.kind === "resize" && win) { S.size = [win.size.width, win.size.height]; saveState(); }
-        else if (drag.kind === "scrollbar" || drag.kind === "presetPan") saveState();
-        else if (drag.kind === "handle" || drag.kind === "anchor") { endLiveGroup(); liveMode = false; }
-        else if (drag.kind === "group") draggedGroup = null;
-        drag = null; pressedId = null; hoverId = null; redraw(true);
-        return;
-      }
-      hoverId = null; redraw();
-    });
+    c.addEventListener("mouseout", canvasMouseOut);
+    c.onKeyDown = canvasKeyDown;
+    c.addEventListener("keydown", canvasKeyDown);
   }
   function openEditor() {
     if (editorOpen && win) { try { win.show(); } catch (e) {} return; }
@@ -3134,6 +3751,8 @@
     win.size = [S.size[0], S.size[1]];
     bindCanvas(win.add("panel", undefined, undefined, { name: "canvas" }));
     win.onClose = function () { stopSpinTask(); endLiveGroup(); saveState(); editorOpen = false; win = null; return true; };
+    win.onKeyDown = canvasKeyDown;
+    win.addEventListener("keydown", canvasKeyDown);
     win.show();
     editorOpen = true;
     win.layout.layout(true);
@@ -3153,25 +3772,37 @@
   }
 
   function buildPanelLauncher(panel) {
-    // The installed ScriptUI panel is the fixed-size editor itself. 0.13 does not expose the
-    // real docked area to onDraw, so the panel is designed for exactly 440x700; if the dock is
-    // smaller the host shows its own scroll area, if larger the window keeps this fixed canvas.
+    // The installed ScriptUI panel is the editor itself. 0.19.0 reports the dock's real size to the
+    // root panel (onResizing/onResize) and lays the canvas out at that size, so onDraw reflows to
+    // the dock; 0.13–0.18 only ever see the preferred size and keep the fixed 340x530 canvas.
     embedded = true;
     win = null;
     refreshTheme();
     loadState();
+    var adaptive = false;
+    try { adaptive = hostVersionAtLeast(0, 19); } catch (e) {}
     panel.orientation = "stack";
     panel.alignChildren = ["fill", "fill"];
     panel.margins = 0;
     panel.spacing = 0;
-    try { panel.preferredSize = [FIXED_W, FIXED_H]; } catch (e) {}
-    try { panel.minimumSize = [FIXED_W, FIXED_H]; } catch (e) {}
+    // On 0.19+ the dock pins the panel to its own size. Keep the preferred size at the layout
+    // floor: a larger preferred (340x530) makes the host show scrollbars whenever the dock is
+    // narrower than it, even though the panel itself already fills the dock.
+    var preferred = adaptive ? [MIN_DOCK_W, MIN_DOCK_H] : [FIXED_W, FIXED_H];
+    try { panel.preferredSize = preferred; } catch (e) {}
     var c = panel.add("panel", undefined, undefined, { name: "canvas" });
-    try { c.preferredSize = [FIXED_W, FIXED_H]; } catch (e) {}
+    try { c.preferredSize = preferred; } catch (e) {}
     bindCanvas(c);
+    // Fire on the root panel after the host laid everything out, with the new size already applied,
+    // so the next onDraw rebuilds the layout for the dock's width/height.
+    panel.onResizing = function () { redraw(); };
+    panel.onResize = function () { redraw(true); };
+    panel.onKeyDown = canvasKeyDown;
+    panel.addEventListener("keydown", canvasKeyDown);
     panel.layout.layout(true);
     statusText = T("选择关键帧 · 拖曲线 · 点 √ 写入");
     redraw(true);
+    startSpinTask();
     editorOpen = true;
   }
 

@@ -6,6 +6,10 @@
 > 2026-10-28：在 EffectCraft **0.17.0**（`effectcraft-cli info` → `"version":"0.17.0"`）上重新
 > 跑过 easing 数学验证、多点写入/选中恢复和实时写入的 UI 端到端验证（见 §8 末尾）。
 > 本文件其余结论仍来自 0.13.0，若行为不一致以 0.17.0 的实测记录为准。
+>
+> 2026-10-31：在 EffectCraft **0.19.0**（`app.version` = `26.0 (EffectCraft 0.19.0)`）上复测了
+> 停靠面板尺寸（§6）和鼠标拖拽（§7）；0.19.0 修复了这两个限制（上游 #2585 / #2584），
+> KCurve 1.1.1 已适配（§8.13）。0.13–0.18 的旧结论仍然成立，脚本会自动退回旧行为。
 
 **结论：可行。** 做 AE Flow 类缓动面板需要的核心能力都在：
 
@@ -13,10 +17,9 @@
 - 读取当前选中关键帧（`comp.selectedProperties` / `Property.selectedKeys`）；
 - 读写关键帧缓动（`keyInTemporalEase` / `keyOutTemporalEase` / `setTemporalEaseAtKey`）；
 - `app.settings` 持久化预设 JSON；
-- 可缩放的自定义面板（需要浮动画布，见“限制”）。
+- 可缩放的自定义面板（浮动画布可以自己拖边缩放）。
 
-唯一明确的平台限制：**停靠的 ScriptUI 面板（`this instanceof Panel`）不会把宿主实际分配到的
-尺寸同步给脚本的 `onDraw`**。详见文末。
+旧的平台限制（**停靠面板拿不到实际尺寸**）在 0.19.0 已修复；0.13–0.18 仍需固定尺寸，详见 §6。
 
 ---
 
@@ -90,14 +93,19 @@ canvas.notify("onDraw");              // 重绘画布
   （`scriptui_view.rs` 里用 `Tokens::ui(size)`）。所以层级用字号和颜色表达。
 - `Path` 只有 `moveTo` / `lineTo` / `rectPath` / `ellipsePath` / `closePath` 等；
   **没有 `cubicTo` / `curveTo`**。圆角矩形用多段折线近似（每角 6 段就够）。
-- 颜色是 **linear RGBA**（0–1），宿主转成 sRGB 显示。若要精确得到某个 sRGB 十六进制色，
-  先做 sRGB → linear 转换再传给 `newBrush/newPen`。
+- 颜色是 0–1 RGBA，但**颜色空间随版本不同**（0.19.0 上游 #2272）：
+  - 0.19.0 起按普通 **sRGB** 显示：传 `v / 255` 就得到 `#RRGGBB` 本身；
+  - 0.13–0.18 按**线性光**处理再套 sRGB 曲线（偏亮）：要得到同一个 `#RRGGBB`，先做
+    sRGB → linear 转换再传。
+  实测 0.19.0 传 `#2B2B2B`、`#D8D8D8`、`#F28C28`、`#A8C7FA`、`#737379`、`#060607`
+  全部逐字节等于源 hex；旧版传 `#A8C7FA` 的线性值 `(0.393,0.571,0.949)` 显示为 `#A8C7FA`。
 - 填充 `g.fillPath(path, brush)`，描边 `g.strokePath(path, pen)`（两个参数均可）。
 - 文本坐标是左上角对齐（宿主 `Align2::LEFT_TOP`）。
 
 ### 2.3 鼠标 / 尺寸
 
-- 鼠标事件只有画布范围内；拖动到窗口外会丢 move 事件，所以拖拽逻辑要健壮。
+- 鼠标事件：0.13–0.18 只有画布范围内有事件，拖出窗口会丢 move；0.19.0 起按下后的
+  mousemove/mouseup 会继续送到按下的控件（含坐标越界），见 §7。
 - 右键用 `mousedown` 的 `e.button === 2` 处理；`click` 事件由 mousedown+mouseup 产生。
 - 画布尺寸用 `this.size`（onDraw 里）读取；窗口尺寸用 `win.size`。
 - 滚轮事件未在支持列表里；自定义列表滚动用拖动/点击滚动条实现。
@@ -277,6 +285,24 @@ layout/draw 代码，但停靠面板不能自适应实际尺寸。
 `unknown command`，`app.run("scriptui.list", {})` 返回空数组。所以“自适应停靠尺寸”
 在 0.17.0 仍然做不到；只能固定尺寸（或者由用户自己挑一个合适的值）。
 
+**0.19.0 复测（2026-10-31）：已修复（上游 #2585 / PR #2629）。**
+
+- 停靠面板的 **root Panel**（不是子 canvas、也没有 Window 对象）会收到 `onResizing` /
+  `onResize`，且触发时 `size` / `bounds` / 子控件 `size` 已经是新值（宿主先
+  `__uiLayout` 再 `__fire`）。事件没有 payload，读 `this.size`。
+- 实测：脚本设 `preferredSize = [340,530]`，打开后 root/canvas 收到 **298×827**（右栏 300 宽，
+  减 2px 边框）；主窗口 `ui.resize 1400×900` 后变成 **298×718**；再缩到 1000×700 变成
+  **298×518**。`scriptui.list` 的 `size` 同步变化。
+- 宿主把停靠尺寸通过 `scriptui.resize {window, size:[w,h]}` 发给脚本（每次尺寸变化一次；
+  首次打开也会发一次）。脚本也可以自己调 `scriptui.resize`，但停靠 root 下一帧会被宿主
+  重新钉回停靠尺寸，所以不要用它改停靠面板。
+- **滚动条**：`preferredSize` 仍会发给宿主，dock root 每帧 `fixed_bounds = max(preferred, dock)`。
+  preferred 比停靠区大时，即使 root 已经填满停靠区，宿主仍会出现滚动条（实测 preferred
+  340×530、dock 298×827 时右/下都有滚动条）。KCurve 1.1.1 在 0.19+ 把 root 和 canvas 的
+  preferred 都设为布局下限 **200×300**，滚动条消失；停靠区小于 200×300 时才出现。
+- `minimumSize` / `maximumSize` 不会被发送，设了也无效。
+- 兼容策略：按 `app.version` 里的 `EffectCraft x.y` 判断是否 ≥ 0.19；旧版仍用 340×530 固定画布。
+
 ## 7. 其他实测坑
 
 - **根窗口 onDraw 不绘制**；必须在子 `panel` 上画。
@@ -291,8 +317,15 @@ layout/draw 代码，但停靠面板不能自适应实际尺寸。
 - 鼠标事件只在画布内；拖出窗口会丢失 mousemove。0.17.0 依然**没有鼠标捕获 API**：
   `window` / `panel` / `canvas` 上没有 capture 成员，`ScriptUI.events` 只有 `createEvent`，
   MouseEvent 字段里也**没有 `buttons`**（只有 `button`，mousemove 时为 0），所以无法判断
-  “拖出窗口之后按键是否还按着”。KCurve 在 `mouseout` 时结束拖拽，避免指针回来时误拖。
-  想做成“拖出去再回来继续”只能用宽限计时器猜，会在“外侧松开又快速回来”时误判。
+  “拖出窗口之后按键是否还按着”。旧版 KCurve 在 `mouseout` 时结束拖拽，避免指针回来时误拖。
+  **0.19.0 已修复（上游 #2584 / PR #2624）**：按下按钮后，`mousemove` / `mouseup` 会一直发给
+  按下的那个控件，坐标 `clientX` / `clientY` 可以是负数或超出控件（实测拖到面板外收到
+  `clientX=-817`，最后 `mouseup` 也送到画布，`buttons` 从 1 变 0）。每个 MouseEvent 都有
+  `buttons`（DOM 位掩码：1 左、2 右、4 中；mousemove / out / over 的 `button` 恒为 0）。
+  `mouseout` / `mouseover` 仍按 hover 触发，所以**不能**再用 mouseout 结束拖拽；KCurve 1.1.1
+  改成用 `buttons` 判断（`buttons === 0` 且此前确实按下过，才视为松手事件丢失并收尾）。
+  仍没有 OS 级抓取：平台停止上报指针位置时不会补事件（没有 PointerGone 分支），所以这个
+  兜底要保留。
 - `Property.selectedKeys` 可读不可写；用 `app.run("keys.select", …)` 选中。
 - 脚本可以 `app.run` 引擎命令，但 `scriptui.*` 会报 “scripts can't drive script windows”。
 - `keyTime` 是 comp 时间；层的 `stretch` 需要参与缓动时长换算。
@@ -561,6 +594,220 @@ E2E 坐标按新几何 `plot=(18,18,304,171)` 复核）。
   "immediately"、缓动应用结果从 "ease side" 改成 "easing side"、添加点提示改成 "with levers"。
 - 删除已不再使用且内容过时的 "Live write (multi-point previews only)" 条目。
 - 版本 1.1.0 作为 1.0.10 之后的大版本发布，汇总 1.0.11–1.0.13。
+
+### 8.13 1.1.1：自适应停靠 + 拖动捕获（0.19.0 实测，2026-10-31）
+
+- **布局改成完全由实际画布尺寸驱动**：`buildLayout(g, W, H)` 里 `W/H` 来自 `onDraw` 的
+  `this.size`；编辑区 `clamp(H*0.38, 110, 340)`，剩余高度给预设库；预设列数按宽度重算。
+  面板最小布局 200×300（`MIN_DOCK_W/H`），比这更小才由宿主滚动。
+- **停靠尺寸**：root 面板挂 `onResizing`（`redraw()` 节流）/ `onResize`（`redraw(true)`）；
+  0.19+ 把 root 和 canvas 的 `preferredSize` 设为 200×300，消掉宿主滚动条（0.13–0.18 仍是
+  340×530）。判断版本用 `app.version` 的 `EffectCraft (\d+)\.(\d+)`，≥ 0.19 才启用。
+- **鼠标捕获**：`noteButtons(e)` 首次看到数值 `e.buttons` 就认定新宿主；`mouseout` 只清 hover /
+  pressed，不再取消 drag；`mousemove` 里 `buttons === 0 && pressedHeld` 视为松手事件丢失并
+  `finishDrag(e)`；旧宿主（没有 `buttons`）保持原 mouseout 取消逻辑。
+- **预设组排序**：0.19 会在面板外很远的地方送达 `mouseup`；松手点不在预设区（含 8px 余量）时
+  取消排序，避免把组丢到末尾。
+- 实测：`ui.drag` 从 hOut 操纵杆拖到面板外 (700,900)，收到连续负 `clientX`，松手后
+  `app.settings` 里 anchors 的 hOut 变成 `{x:0.03,y:0.03}`（clamp 后的值）并保存；
+  之后点齿轮实时写入仍能正常切换。三种停靠宽度 298 / 558 / 210 下截图检查通过，预设列数
+  4 / 7 / 2，宽度 ≥ 200 时无宿主滚动条。
+
+### 8.14 1.1.2：跟随 0.19.0 的脚本颜色空间（2026-10-31）
+
+- 0.19.0 的 #2272 把 ScriptUI 颜色从「线性光 + sRGB 输出」改成「普通 sRGB 直出」。KCurve 的
+  `C(hex)` 以前一直做 sRGB→线性来抵消旧 bug，所以在 0.19.0 上所有面板色变暗：`#A8C7FA`
+  画成 (100,146,244)、`#737379` 画成约 (43,43,49)，状态栏和禁用按钮几乎看不见。
+- 1.1.2 在 `C()` 里按 `hostVersionAtLeast(0,19)` 选颜色空间：0.19+ 用 `v/255`，更早用
+  `srgbToLinear(v)`。实测 0.19.0 上 `#060607` → (6,6,7)、`#1F3550` → (31,53,80)、
+  `#A8C7FA` → (168,199,250)、`#737379` → (115,115,121)，与目标 hex 完全一致。
+- 用一个直接画裸 sRGB 值的探针面板确认了 0.19.0 的新语义：`#2B2B2B` → (43,43,43)、
+  `#D8D8D8` → (216,216,216)、`#F28C28` → (242,140,40)，逐字节相等。
+- 这条判断和 §6 的停靠版本判断共用 `hostVersionAtLeast()`；AE 移植版没有 EffectCraft 的
+  `app.version`，仍保持 1.1.0 的界面色板逻辑。
+
+### 8.15 1.1.3：折叠工具栏、星星保存、预设组 +（2026-10-31）
+
+- **工具栏**：常驻行 = ☰（折叠）+ √ 应用 + ☆ 保存预设。工具默认折叠（`S.toolsOpen = false`，
+  存 `app.settings` 的 `toolsOpen`）；展开后第一行最多 5 个工具，按宽度自动换行到下面的行。
+  应用宽度 = 星星左侧剩余空间（最小 36px），所以星星不会把勾挤掉。
+- **设置菜单**：左键 ☰ 直接展开/收起，**右键** ☰ 打开设置菜单（语言、显示工具栏、
+  停止拖动后写入）。状态栏悬停提示当前展开/收起状态。
+- **预设标题栏**：只保留「预设库」文字；「新建预设组」的 + 右对齐到组 chip 行最右边
+  （`layoutPresets` 里 `ngX = rect.x + rect.w - 26`，和最后一个 chip 相撞时换行），
+  「保存」改成工具栏的 ☆。空组提示改成「点右上角 ☆ 保存」。
+- **导入图标**：按参考图改成前面圆角方块 + 后面 L 形纸张（`drawIcon` 的 `import` 分支）。
+- 实测：298/512/210 宽度下展开/折叠布局、☰ 左键切换 + 右键菜单、☆ 保存对话框、
+  组行 + 新建组对话框均通过；`toolsOpen` 重启后保持。
+
+### 8.16 1.1.4：组位 +、文档导入图标、固定首尾点、平滑图标、逐工具开关（2026-10-31）
+
+- **新建预设组 +**：1.1.3 把它右对齐在 chip 行末尾；1.1.4 按反馈改成“组位”——紧跟在最后
+  一个组 chip 后面、跟着 chip 换行（`layoutPresets` 里 `chipX` 游标继续往后排）。
+- **导入图标**：改成两张叠放文档——后一张从左下露出，前一张带右上折角和两条文字线
+  （`drawIcon` 的 `import` 分支用折线画，不用 fill）。
+- **首尾点固定**：`clampAnchorHandles()` 强制第 0 点 (0,0)、最后一点 (1,1)；`canvasMouseDown`
+  对这两个锚点只选中、不建 drag，状态栏提示可以拖操纵杆；`loadState` / `loadPreset` 调
+  `enforceEndpoints()`。`drawEditor` 的 plot 由 1px 内缩改成 **12px**（选中圆环外半径），
+  首尾点圆环不再越出编辑器边框。
+- **平滑 / 折断图标**：折断（不联动）用原来的折线图标；平滑（联动）改成一条贝塞尔曲线
+  （12 段折线采样）。`state.filled` 仍表示当前点是否平滑。
+- **逐工具显示开关**：`TOOL_VISIBILITY` 列出 9 个工具；`toolVisible(id)` 过滤
+  `toolControls()`；`S.toolVisible`（只存 false）在设置 ▸ 工具显示…里逐项切换并持久化。
+  整栏折叠（`toolsOpen`）保留，两者独立。
+- 实测：取消「导入」后工具栏重排且刷新后仍隐藏；首尾点拖拽被拒；平滑点显示贝塞尔图标；
+  预设组 + 紧跟最后一组；截图见 `.tmp/shots/d5-*`。
+
+### 8.17 1.1.5：平滑 / 折断按钮常驻（2026-10-31）
+
+- 1.1.4 的 `toolControls()` 里 `icon:smooth` 只在 `isMulti()` 时加入；删掉中间点回到单段后按钮
+  消失，用户反馈“平滑和折断不见了”。
+- 1.1.5 改成常驻：单段模式 `disabled: true`（`drawTool` 用 faint 颜色），`iconHint` 提示
+  “多点模式才需要平滑/折断”；点击走 `toggleSmooth()` 原有的单段保护，状态栏说明原因。
+  多点模式恢复 `active` 并按选中点显示贝塞尔 / 折线图标。
+
+### 8.18 1.1.6：导入图标去掉背面右下角的上翘（2026-10-31）
+
+- 背面纸张的路径原来在底边右端又向上折一小段（`lineTo(cx + 5, cy + 5)`），在 28px 图标里
+  会从下面那行文字中间穿出来。1.1.6 让背面只画到右下底边为止，同时把前面文档的两条文字线
+  上移 1px，底边留白更干净。
+
+### 8.19 1.1.7：预设拖动、顺序缓存、保存对话框（2026-10-31）
+
+- **拖动预设**：mousedown 在格子上建 `drag.kind="preset"`，移动 >4px 激活；`computePresetDrop`
+  先看指针是否在某个组 chip 上（跨组移动），否则按 `list`、`S.scroll`、`cols/cellW/cellH`
+  算行/列，右半格插入到后面。`applyPresetDrop` 跨组时从原组移除、追加到目标组末尾、
+  `selectedGroupId` 切到目标组；组内则 splice 重排。
+- **顺序不刷新**：`presetLayoutKey` 原来只包含组名和预设数量，不含预设 id 顺序，重排后
+  `presetLayoutCache` 仍返回旧 cells；现在把每个预设 id 按顺序拼进 key，并在 drop 后清缓存。
+- **保存对话框**：去掉「新建组名」输入框（之前焦点常落在它上面，用户输入预设名时会不小心
+  建成新组），只剩名称 + 保存到组；`name.active = true` 把焦点放到名称框。`saveCurrentAsPreset`
+  在组名缺失时回退到当前组/第一个组，不再凭空建组，并在保存后选中新预设、切到目标组。
+- 实测：组内拖动后状态与截图顺序一致；拖到「经典」chip 后预设进入 Classic 并自动切组；
+  Save Preset 对话框高度 180，两行字段。
+
+### 8.20 1.1.8：点击反馈、预设库左右侧、蓝框、齿轮、去标题（2026-10-31）
+
+- **点击反馈**：`drawTool` 的 `solidPress` 让 `icon:import` / `icon:add` / `icon:del` /
+  `button:savePreset` 按下时整格 `P.primary`、图标 `P.bg`，悬停 `withAlpha(P.primary, 0.2)`。
+- **预设库位置**：新增 `S.presetSide`（top/left/right，默认 top）。`buildLayout` 的 side
+  分支把工具栏+编辑器放一侧、预设区放另一侧；`editorW < 190` 时退回 top。设置菜单
+  「预设库位置」写入 `presetSide`。600×829 实测左侧布局正常。
+- **编辑器蓝色描边**：`drawEditor` 的 `strokeRect` 改成 `withAlpha(P.primary, 0.8)`、1.5px。
+- **齿轮**：`drawIcon("gear")` 用 12 齿外轮廓 + 反向内圆 path；关=白描边，开=蓝填充且中心
+  留孔（非零填充规则）。`drawTool` 把时间换算成 `state.angle`，整条 path 旋转。
+- **停靠面板旋转修复**：`startSpinTask()` 原来只在浮动窗口调用，且 `kcurveSpinTick` 要求
+  `win` 非空；停靠面板 `win=null` 导致任务第一帧就停。现在面板也 `startSpinTask()`，tick
+  只要求 `canvas`，并把 `KCurveSpinTick` 挂到 `$.global` 供 `scheduleTask` 解析。
+- **预设区标题**：`layoutPresets` 的 `headerH` 改为 0，去掉「预设库」text；chip 从顶部开始。
+- 实测：导入/添加按下变蓝；齿轮两帧差异存在；齿轮中心孔取色 = 宿主背景；
+  600×829 左侧布局截图通过。
+
+### 8.21 1.1.9：实时写入关闭时齿轮静止（2026-10-31）
+
+- 1.1.8 的齿轮角度一直取墙上时间，虽然 spin task 只在实时写入开启时主动重绘，但悬停、
+  选择变化等其它重绘也会让齿轮换一个角度，看起来仍在转。1.1.9 让 `drawTool` 只在
+  `S.realtime` 为真时传时间角度，否则传 0，关闭状态下齿轮固定不动。
+
+### 8.22 1.1.10：编辑器圆角（2026-10-31）
+
+- `drawEditor` 的卡片背景和蓝色描边改用 `fillRound` / `strokeRound`，半径 8px；plot 仍内缩 12px，
+  曲线/首尾点/边界框位置不变。
+
+### 8.23 1.1.11：删除点与键盘限制（2026-10-31）
+
+- 探针面板（`KeyProbe.jsx`）在 0.19.0 上监听 `keydown` / `keypress` / `keyup` 并读
+  `ScriptUI.environment.keyboardState`：点击面板、`ui.focus` 后发送 Delete / A / Cmd+Z，
+  日志只有 mousedown/click；`keyboardState` 始终是
+  `{shiftKey:false,ctrlKey:false,altKey:false,metaKey:false,keyName:""}`。ScriptUI 源码
+  （`scriptui.js`）也只派发鼠标事件，没有键盘路径。**所以 Delete 键在当前版本无法实现。**
+- 1.1.11 的可用删除方式：中间点 **Alt+单击**（`canvasMouseDown` 在 hitTest 后判断
+  `hit.kind === "anchor" && e.altKey` → `deleteAnchor()`）；右键锚点弹出
+  「删除这个点 / 平滑 / 折断」菜单。`canvasKeyDown` 仍注册 Delete/Backspace，宿主未来支持
+  键盘事件时会自动可用。
+- 首尾点继续受 `deleteAnchor()` 保护；单段模式没有可删的中间点。
+
+### 8.24 1.1.12：操纵杆默认全部可见（2026-10-31）
+
+- `drawEditor` 原来在多点模式下 `if (multi && ai !== selected) continue`，只画选中点的杆。
+  1.1.12 改成 `if (multi && S.onlySelectedHandles && ai !== selected) continue`；新增
+  `S.onlySelectedHandles`（默认 false，存 `app.settings` 的 `onlySelectedHandles`）。
+  设置 ▸ 编辑器 ▸「只显示选中点的操纵杆」切换，默认关闭 = 所有点的杆都显示。
+- 所有被画出的杆都会 push 到 `handlesHit`，所以默认模式下任意点的杆都可以直接拖，拖时会自动选中该点。
+- 实测 4 点多点曲线：默认截图可见多个杆点；打开只显示选中点后其余杆消失，状态栏提示
+  “Levers: selected point only”。
+
+### 8.25 1.1.13：操纵杆按段限制（2026-10-31）
+
+- `clampAnchorHandles(i)` 现在为 hIn / hOut 分别算 x 范围：
+  `hIn ∈ [anchors[i-1].x, a.x]`，`hOut ∈ [a.x, anchors[i+1].x]`；首点 hOut 上界 1、末点 hIn
+  下界 0。y 范围仍按 overshoot 开关（0–1 或 -1.2..2.2）。这等价于 AE 的 influence 0–100%。
+- `loadState` / `loadPreset` / 两种 import 后的 `clampAllAnchors()` 不再用 `if (!allowOvershoot)`
+  包着，旧曲线里跨段的杆载入时就会被收紧。
+- 实测：overshoot 开、4 点多点曲线，选中点 hOut 从 0.165 拖到最右 → 最终 x=0.5（下一锚点 x），
+  没有越过段边界。
+
+### 8.26 1.1.14：经典组 9 条新曲线 + 反转（2026-10-31）
+
+- `classicPresets()` 生成 9 条曲线，id `cl-1`…`cl-9`，名字“曲线 1”…“曲线 9”；数值按用户给的
+  四组数字原样写入（`presetAnchors(x1,y1,x2,y2)`）。`BUILTIN_GROUPS` 的 classic 改用这个函数。
+- `STATE_VERSION` 5 → 6；`migrateClassicPresets(st)` 找到 `builtin_classic`（或名为 经典/Classic
+  的组）后 `presets = classicPresets()`。实测用 v5 状态（Classic 里有一条 OLD）打开后，
+  OLD 消失、9 条曲线出现，保存后 version=6。
+- **反转**：`reverseCurve()` 倒序锚点并镜像 `x,y`，交换 hIn/hOut 的角色；`icon:reverse`
+  画两支 L 形箭头（90° 折角带小圆角），加进工具显示列表。单段实测 0.2,0 / 0,1 反转成
+  1,0 / 0.8,1。
+
+### 8.27 1.1.15：操纵杆可以精确落在点上（2026-10-31）
+
+- `clampHandle` 的防重叠 nudge（距离 < 0.0004 时加 0.03 偏移）删除：用户把单段出杆拖到
+  左下角时，hOut 现在精确是 `{x:0,y:0}`，不会再“挤出一点”。
+- `hitTest` 的重叠优先级改为杆优先：`bestHandle && (!bestAnchor || bestHD <= bestAD)` →
+  handle。杆的圆点在锚点之后绘制，所以视觉上也在上面。
+- 实测：默认单段 `hOut 0.33,0` 拖到角上读回 `0,0`；在同一坐标再按下拖动，`hOut` 变成
+  `0.1938,0.069`，端点仍 `0,0`，说明抓到的是杆而不是锚点。
+
+### 8.28 1.1.16：多点导入读取真实杆（2026-10-31）
+
+- 旧 `importMultiPoints` 把每个点建成 `hIn:null,hOut:null` 再 `ensureMultiHandles`，所以多点导入
+  的杆永远是默认 1/3。1.1.16 对每段调用 `readPairCurve(p, keys[j])`，把段内归一化的
+  x1,y1（出侧）和 x2,y2（入侧）映射到 `pts[j].hOut` / `pts[j+1].hIn`。
+- 实测：4 个 opacity 键（influences 10/80、20/40、50/25、70/10，speed 0）导入后：
+  hOut1.x=0.2667；hIn2.x=0.2667 / hOut2.x=0.4667；hIn3.x=0.5 / hOut3.x=0.75；
+  hIn4.x=0.7667。全部与 influence 对应，不再是 1/3。
+- HOLD / 读取失败的段交给 `ensureMultiHandles` 回退；杆 y 越界会打开 Overshoot。
+
+### 8.29 1.1.17：浅段杆读回被压平（2026-10-31）
+
+- 用户用「后跳」预设（4 段，第二段 y 1 → 0.9894）写进关键帧后再导入，杆的 y 全变成
+  0.96825。复现后确认：预设里 hOut1 相对该段 y 差是 40（绝对 y 0.5767），而
+  `readPairCurve` 最后 `clamp(y1,-2,3)` 把 40 截成 3，导入映射成绝对 y 0.96825。
+- 修复：`readPairCurve` 返回原始相对 y（已有 finite 检查），绝对位置交给
+  `clampAnchorHandles`（0–1 / -1.2..2.2）。实测应用→导入后杆 y 恢复为
+  0.57672 / 0.59788 / 0.85185，x 只因关键帧吸附到帧而偏移 ~0.002–0.003。
+- 单段导入同样受益：相对 y 不再被 [-2,3] 截断，越界由绝对范围限制。
+
+### 8.30 1.1.18：平滑点另一根杆长度漂移（2026-10-31）
+
+- 用户录屏里拖平滑点的一根杆时，另一根杆越拖越长。原因：每次 mousemove 都从 `other` 的
+  当前位置重新计算 `lenOther`，而 `clampAnchorHandles` 可能已改变它的位置；反复“镜像 + 钳制”
+  让长度累积增长。
+- 修复：`canvasMouseDown` 的 handle 分支记住 `drag.otherLen0 = dist(other, anchor)`；
+  mousemove 的平滑镜像只用这个固定长度。零长度时不动另一边，避免两根杆一起塌到点上。
+- 实测：hIn 初始长度 0.1720465；拖 hOut 到 `(0.85,0.5)` 后 hIn 仍 0.1720465；把 hOut 拖到
+  `(0.5,0.7)` 时 hIn 保持 `(0.36,0.6)`；在点上再按下拖动，抓到的是 hOut，可以拉出来。
+- 段的水平边界（1.1.13）不变。
+
+### 8.31 2.0.0：反转反馈、性能与全脚本审计（2026-10-31）
+
+- 反转按钮加入 `solidPress`，与应用/导入/加点/减点/☆ 同一套按下反馈。
+- 性能：`measure` 增加文本宽度缓存（按内容/字号/样式/上限，>2000 清空）；`selectionCount`
+  120ms 缓存；无齿轮可见时自旋轮询 4 Hz；去掉操纵杆圆点重复绘制；齿轮不可见时不做 80ms
+  全量重绘。
+- 审计修复：`importMultiPoints` 先 `S.allowOvershoot=true` 再 `ensureMultiHandles`；
+  `loadPreset` 记录 `wasMulti`，从多段切单段预设时不再因实时写入静默 apply。
+- 验证：`ease_math_probe`（pass=true）、`multipoint_probe`（pass=true/failed=0）；反转按下截图
+  整格蓝色；4 段过冲导入后 hOut.y=1.5/2.2，allowOvershoot=true；齿轮旋转两帧有差异。
 
 ## 9. 参考资料
 

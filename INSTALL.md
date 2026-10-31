@@ -1,4 +1,4 @@
-# KCurve 1.1.0 安装
+# KCurve 2.0.0 安装
 
 ## 安装固定面板
 
@@ -11,7 +11,8 @@
 4. 启动 EffectCraft。
 5. 从菜单 **Window ▸ KCurve.jsx** 打开。
 
-面板尺寸固定为 **340×530**；如果停靠区更小，EffectCraft 会出现滚动条。
+面板会**跟着停靠区自动重排**（**EffectCraft 0.19.0 专属**）；最小布局 200×300，比这更小才出现滚动条。
+旧版 EffectCraft（0.13–0.18）**未测试，不保证可用**；停靠自适应和稳定运行只针对 0.19.0 验证过。
 
 ## 升级
 
@@ -24,6 +25,6 @@
 
 ## 注意
 
-- 不要把 KCurve 同时放进 `Scripts\KCurve.jsx`；1.1.0 只保留 ScriptUI Panels 入口，避免出现两个版本。
+- 不要把 KCurve 同时放进 `Scripts\KCurve.jsx`；2.0.0 只保留 ScriptUI Panels 入口，避免出现两个版本。
 - 首次打开会读取 EffectCraft 的界面语言；之后可以选择中文或 English，选择会记住。
 
