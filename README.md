@@ -3,7 +3,7 @@
 **EffectCraft 的 Flow / Kease 风格缓动曲线编辑器。**  
 单文件 ScriptUI 脚本，停靠在 EffectCraft 面板中，支持单段曲线、多点关键帧、超出边界和预设库。
 
-![KCurve 在 EffectCraft 中](docs/screenshots/effectcraft.png)
+![KCurve 在 EffectCraft 中](docs/screenshots/effectcraft.png?v=2.0.0)
 
 当前版本：**2.0.0**  
 适用：**EffectCraft 0.19.0**（停靠自适应是 0.19 专属）；旧版本未测试，不保证可用。
@@ -25,7 +25,7 @@ KCurve 把关键帧的缓动从数字参数变成一条可以拖的曲线：
 
 ## 多点关键帧编辑
 
-![多点关键帧编辑](docs/screenshots/multi.png)
+![多点关键帧编辑](docs/screenshots/multi.png?v=2.0.0)
 
 多点模式每个控制点都会变成一个真正的时间线关键帧：
 
@@ -46,7 +46,7 @@ KCurve 把关键帧的缓动从数字参数变成一条可以拖的曲线：
 
 ## 超出边界（Overshoot）
 
-![超出边界与实时写入](docs/screenshots/overshoot.png)
+![超出边界与实时写入](docs/screenshots/overshoot.png?v=2.0.0)
 
 工具栏里的**链条图标**控制是否允许曲线超出 0–1：
 
@@ -61,7 +61,7 @@ KCurve 把关键帧的缓动从数字参数变成一条可以拖的曲线：
 
 ## 单段曲线
 
-![单段曲线](docs/screenshots/single.png)
+![单段曲线](docs/screenshots/single.png?v=2.0.0)
 
 - 横轴是时间 0–1，纵轴是值 0–1；
 - 拖**锚点**改关键帧的值/时间位置；首尾点固定在 (0,0) / (1,1)，只能拖它们的操纵杆；
