@@ -193,11 +193,6 @@ KCurve 把关键帧的缓动从数字参数变成一条可以拖的曲线：
 
 ---
 
-## 贡献者
-
-- **KOGGUA-EDIT** — 项目发起、设计、测试与发布
-- **DeepSeek** — AI 编程助手，参与代码实现、文档与打包
-
 ## License
 
 MIT。见 [LICENSE](LICENSE)。
