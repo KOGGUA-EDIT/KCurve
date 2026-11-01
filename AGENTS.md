@@ -32,3 +32,17 @@ Copy-Item 'D:\app edit\kcurve\KCurve.jsx' "$env:APPDATA\EffectCraft\Scripts\Scri
 - UI 端到端：`verify/e2e_setup.jsx` + `verify/e2e_read.jsx`，配合
   `effectcraft.exe --control <port>` 和 `scriptui.mouse` 模拟点击/拖拽。
 - 改脚本后至少跑一次 `node --check`（Node 路径见会话环境）做语法检查。
+
+## AI 署名
+
+- **AI 参与的提交**，在提交信息末尾加一行共作者署名（GitHub 会据此把 AI 计入仓库贡献者）：
+
+  ```
+  Co-authored-by: DeepSeek <350922609+deepseek-kg1@users.noreply.github.com>
+  ```
+
+- 只标确有 AI 参与的提交；纯手工提交不加。
+- 署名不改变 Git 作者：作者始终是
+  `KOGGUA-EDIT <290471474+KOGGUA-EDIT@users.noreply.github.com>`，也不要拿它替代 `Signed-off-by`。
+- AI 的专属 GitHub 账号是 [@deepseek-kg1](https://github.com/deepseek-kg1)，上面那串就是它的
+  noreply 地址（`<ID>+<username>@users.noreply.github.com`）。别换成真实邮箱，避免把邮箱写进公开历史。
