@@ -1,5 +1,5 @@
 /*
- * KCurve 2.0.0 — Flow-style easing curve editor for EffectCraft.
+ * KCurve 2.0.1 — Flow-style easing curve editor for EffectCraft.
  *
  * Platform: EffectCraft 0.19.0. Docked adaptive resizing is a 0.19-only feature; older versions
  * (0.13–0.18) are untested and not supported for this release.
@@ -69,7 +69,7 @@
 
 (function (thisObj) {
   // ---------------------------------------------------------------- constants
-  var KCURVE_VERSION = "2.0.0";
+  var KCURVE_VERSION = "2.0.1";
   var SETTINGS_SECTION = "KCurve";
   var SETTINGS_KEY = "state";
   var STATE_VERSION = 6;
@@ -342,6 +342,30 @@
     g.ellipsePath(x - r, y - r, r * 2, r * 2);
     if (fillColor) g.fillPath(g.newBrush(g.BrushType.SOLID_COLOR, fillColor));
     if (strokeColor) g.strokePath(g.newPen(g.PenType.SOLID_COLOR, strokeColor, strokeW || 1));
+  }
+  // Icon artwork is authored in SVG space: a 576-unit square centred on (288,288). These helpers
+  // map such coordinates onto the glyph box (k = pixels per design unit), so the files in svg/ can
+  // be transcribed point for point instead of being hand-scaled for every button size.
+  function iconSvgPath(g, cx, cy, k, pts, close) {
+    var i, p;
+    for (i = 0; i < pts.length; i++) {
+      p = pts[i];
+      if (i === 0) g.moveTo(cx + (p[0] - 288) * k, cy + (p[1] - 288) * k);
+      else g.lineTo(cx + (p[0] - 288) * k, cy + (p[1] - 288) * k);
+    }
+    if (close) g.closePath();
+  }
+  // ScriptUI Graphics has no curve primitive, so a cubic segment is flattened into a polyline.
+  function cubicPoints(p0, p1, p2, p3, steps) {
+    var out = [], i, t, mt;
+    for (i = 0; i <= steps; i++) {
+      t = i / steps; mt = 1 - t;
+      out.push([
+        mt * mt * mt * p0[0] + 3 * mt * mt * t * p1[0] + 3 * mt * t * t * p2[0] + t * t * t * p3[0],
+        mt * mt * mt * p0[1] + 3 * mt * mt * t * p1[1] + 3 * mt * t * t * p2[1] + t * t * t * p3[1]
+      ]);
+    }
+    return out;
   }
   function dashedLine(g, x1, y1, x2, y2, color, width, dash, gap) {
     var dx = x2 - x1, dy = y2 - y1, len = Math.sqrt(dx * dx + dy * dy);
@@ -2341,56 +2365,36 @@
       return;
     }
     if (kind === "import") {
-      // Copy/import: a back sheet at the bottom-left and a front document with a folded top-right
-      // corner and two text lines (the reference icon). The back sheet's bottom-right corner stays
-      // open (no upward tick) so it does not poke through the lower text line.
+      // The reference artwork (svg/复制.svg): a back sheet peeking out along the left and bottom, and
+      // a front document whose top-right corner is cut off. The artwork hides the rest of the back
+      // sheet under the front sheet's white fill; a stroked icon cannot fill, so only the visible run
+      // of the back sheet is drawn - it starts and ends exactly where that fill would have covered it
+      // (on the front sheet's left edge and on its bottom edge).
+      var copyK = r / 112;
       g.newPath();
-      g.moveTo(cx - 10.5, cy - 4);
-      g.lineTo(cx - 10.5, cy + 5.5);
-      g.lineTo(cx - 8, cy + 8.5);
-      g.lineTo(cx + 5, cy + 8.5);
+      iconSvgPath(g, cx, cy, copyK,
+        [[220.07, 206.188], [188.669, 206.188], [188.669, 406.607], [363.017, 406.607], [363.017, 372.73]],
+        false);
       g.strokePath(pen);
       g.newPath();
-      g.moveTo(cx - 6, cy - 9);
-      g.lineTo(cx + 3.5, cy - 9);
-      g.lineTo(cx + 9, cy - 4);
-      g.lineTo(cx + 9, cy + 4);
-      g.lineTo(cx + 7.5, cy + 6);
-      g.lineTo(cx - 4.5, cy + 6);
-      g.lineTo(cx - 6, cy + 4);
-      g.lineTo(cx - 6, cy - 9);
+      iconSvgPath(g, cx, cy, copyK,
+        [[340.471, 169.393], [219.904, 169.927], [220.805, 373.358], [387.331, 372.621], [386.606, 208.903]],
+        true);
       g.strokePath(pen);
-      // folded corner
-      g.newPath();
-      g.moveTo(cx + 3.5, cy - 9);
-      g.lineTo(cx + 3.5, cy - 4);
-      g.lineTo(cx + 9, cy - 4);
-      g.strokePath(pen);
-      line(g, cx - 2, cy - 1.5, cx + 6, cy - 1.5, color, 1.4);
-      line(g, cx - 2, cy + 2, cx + 6, cy + 2, color, 1.4);
       return;
     }
     if (kind === "plus") { line(g, cx - 7, cy, cx + 7, cy, color, 1.8); line(g, cx, cy - 7, cx, cy + 7, color, 1.8); return; }
     if (kind === "minus") { line(g, cx - 7, cy, cx + 7, cy, color, 1.8); return; }
     if (kind === "smooth") {
-      // Smooth points show a Bézier curve; broken points keep the previous "straight segments"
-      // mark (the old smooth-state icon).
+      // svg/平滑.svg: a single S-curve running from the top right to the bottom left. A smooth point
+      // shows the curve; a broken point shows the same footprint drawn as straight segments (the
+      // "straight segments" mark the old icon used).
+      var smoothK = r / 200;
+      var spts = state.filled
+        ? cubicPoints([472.334, 103.666], [288, 103.666], [285.254, 472.334], [103.666, 472.334], 28)
+        : [[472.334, 103.666], [371, 103.666], [205, 472.334], [103.666, 472.334]];
       g.newPath();
-      if (state.filled) {
-        var b0x = cx - 7, b0y = cy + 5, b1x = cx - 3, b1y = cy + 5,
-          b2x = cx - 3, b2y = cy - 5, b3x = cx + 7, b3y = cy - 5, bk, bt, bmt;
-        for (bk = 0; bk <= 12; bk++) {
-          bt = bk / 12; bmt = 1 - bt;
-          var bx = bmt * bmt * bmt * b0x + 3 * bmt * bmt * bt * b1x + 3 * bmt * bt * bt * b2x + bt * bt * bt * b3x;
-          var by = bmt * bmt * bmt * b0y + 3 * bmt * bmt * bt * b1y + 3 * bmt * bt * bt * b2y + bt * bt * bt * b3y;
-          if (bk === 0) g.moveTo(bx, by); else g.lineTo(bx, by);
-        }
-      } else {
-        g.moveTo(cx - 7, cy + 5);
-        g.lineTo(cx - 3, cy + 5);
-        g.lineTo(cx + 3, cy - 5);
-        g.lineTo(cx + 7, cy - 5);
-      }
+      iconSvgPath(g, cx, cy, smoothK, spts, false);
       g.strokePath(pen);
       return;
     }

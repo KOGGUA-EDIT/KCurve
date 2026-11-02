@@ -5,7 +5,7 @@
 
 ![KCurve 在 EffectCraft 中](docs/screenshots/effectcraft.png?v=2.0.0)
 
-当前版本：**2.0.0**  
+当前版本：**2.0.1**  
 适用：**EffectCraft 0.19.0**（停靠自适应是 0.19 专属）；旧版本未测试，不保证可用。
 
 KCurve 把关键帧的缓动从数字参数变成一条可以拖的曲线：
