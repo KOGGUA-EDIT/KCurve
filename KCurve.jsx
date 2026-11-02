@@ -1,5 +1,5 @@
 /*
- * KCurve 2.0.1 — Flow-style easing curve editor for EffectCraft.
+ * KCurve 2.0.2 — Flow-style easing curve editor for EffectCraft.
  *
  * Platform: EffectCraft 0.19.0. Docked adaptive resizing is a 0.19-only feature; older versions
  * (0.13–0.18) are untested and not supported for this release.
@@ -69,7 +69,7 @@
 
 (function (thisObj) {
   // ---------------------------------------------------------------- constants
-  var KCURVE_VERSION = "2.0.1";
+  var KCURVE_VERSION = "2.0.2";
   var SETTINGS_SECTION = "KCurve";
   var SETTINGS_KEY = "state";
   var STATE_VERSION = 6;
@@ -2369,8 +2369,9 @@
       // a front document whose top-right corner is cut off. The artwork hides the rest of the back
       // sheet under the front sheet's white fill; a stroked icon cannot fill, so only the visible run
       // of the back sheet is drawn - it starts and ends exactly where that fill would have covered it
-      // (on the front sheet's left edge and on its bottom edge).
-      var copyK = r / 112;
+      // (on the front sheet's left edge and on its bottom edge). div 128 keeps the drawn sheets at
+      // about the same footprint as the other toolbar glyphs.
+      var copyK = r / 128;
       g.newPath();
       iconSvgPath(g, cx, cy, copyK,
         [[220.07, 206.188], [188.669, 206.188], [188.669, 406.607], [363.017, 406.607], [363.017, 372.73]],
