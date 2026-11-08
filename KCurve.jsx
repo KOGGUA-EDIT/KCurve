@@ -1,5 +1,5 @@
 /*
- * KCurve 2.0.4 — Flow-style easing curve editor for EffectCraft.
+ * KCurve 2.0.5 — Flow-style easing curve editor for EffectCraft.
  *
  * Platform: EffectCraft 0.19.0. Docked adaptive resizing is a 0.19-only feature; older versions
  * (0.13–0.18) are untested and not supported for this release.
@@ -62,6 +62,8 @@
  *
  * Material 3 Expressive: everything except the editor canvas is drawn as rounded cards/pills, with
  * a dark/light palette read from EffectCraft's appearance.theme and large, expressive radii.
+ * Settings ▸ 外观 ▸ 去掉所有圆角 squares every radius at once (state.squareCorners): the drawing
+ * helpers share one roundedRectPoints() vertex source, so the whole UI turns to right angles.
  *
  * License: MIT. The easing math follows EffectCraft's official Ease Presets extension
  * (MIT OR Apache-2.0) by the EffectCraft contributors.
@@ -69,7 +71,7 @@
 
 (function (thisObj) {
   // ---------------------------------------------------------------- constants
-  var KCURVE_VERSION = "2.0.4";
+  var KCURVE_VERSION = "2.0.5";
   var SETTINGS_SECTION = "KCurve";
   var SETTINGS_KEY = "state";
   var STATE_VERSION = 6;
@@ -281,7 +283,15 @@
   // keep that convention.
   // Rounded-rect vertices as a polyline. Kept separate from the drawing call because the preset
   // list crops its cells with the host's missing clip API: the vertices can be clipped by geometry.
+  // Settings ▸ 外观 ▸ 去掉所有圆角 flips one switch here: every card, chip, button, thumbnail,
+  // scrollbar, menu and drag pill goes through this helper, so square mode needs no per-call
+  // conditionals. Circle primitives (curve anchors, handle dots, icon details) stay circular -
+  // they are points, not rounded corners.
+  function squareCorners() { return !!(S && S.squareCorners); }
   function roundedRectPoints(x, y, w, h, r, segOverride) {
+    if (squareCorners()) {
+      return [{ x: x, y: y }, { x: x + w, y: y }, { x: x + w, y: y + h }, { x: x, y: y + h }];
+    }
     r = Math.max(0, Math.min(r, Math.min(w, h) / 2));
     // Every rounded shape is painted as a polyline and the canvas is fully repainted while
     // dragging, so the corner segment count is a direct per-frame cost. At 1x with no
@@ -1255,6 +1265,7 @@
       realtime: false,
       writeOnRelease: false,
       showStatus: true,
+      squareCorners: false,
       toolsOpen: false,
       toolVisible: {},
       presetSide: "top",
@@ -1302,6 +1313,8 @@
     "工具栏": "Toolbar",
     "显示工具栏": "Show tools",
     "显示状态提示": "Show status hints",
+    "外观": "Appearance",
+    "去掉所有圆角": "Square corners",
     "预设库位置": "Presets position",
     "上侧": "Top",
     "左侧": "Left",
@@ -1410,6 +1423,7 @@
           if (o.realtime === true) st.realtime = true;
           if (o.writeOnRelease === true) st.writeOnRelease = true;
           if (o.showStatus === false) st.showStatus = false;
+          if (o.squareCorners === true) st.squareCorners = true;
           if (typeof o.toolsOpen === "boolean") st.toolsOpen = o.toolsOpen;
           if (o.presetSide === "top" || o.presetSide === "left" || o.presetSide === "right") st.presetSide = o.presetSide;
           if (o.onlySelectedHandles === true) st.onlySelectedHandles = true;
@@ -1596,6 +1610,7 @@
         realtime: !!S.realtime,
         writeOnRelease: !!S.writeOnRelease,
         showStatus: S.showStatus !== false,
+        squareCorners: !!S.squareCorners,
         toolsOpen: S.toolsOpen !== false,
         toolVisible: S.toolVisible || {},
         presetSide: S.presetSide || "top",
@@ -2707,6 +2722,15 @@
         S.presetSide === "top" ? "Presets: top" : (S.presetSide === "left" ? "Presets: left" : "Presets: right"));
     }
   }
+  // Settings ▸ 外观 ▸ 去掉所有圆角. The switch persists with the rest of the state and takes
+  // effect on the next paint; the roundedRectPoints gate reads it for every shape.
+  function toggleSquareCorners(menuX, menuY) {
+    S.squareCorners = !S.squareCorners;
+    saveState();
+    st(S.squareCorners ? "已去掉全部圆角（直角模式）" : "已恢复所有圆角",
+      S.squareCorners ? "All corners squared" : "Rounded corners restored");
+    openSettingsMenu(menuX, menuY);
+  }
   function openToolVisibilityMenu(x, y) {
     if (!S.toolVisible) S.toolVisible = {};
     var items = [{ header: true, label: T("工具显示") }], i;
@@ -2734,6 +2758,11 @@
       { header: true, label: T("设置") },
       { label: (en() ? "✓ " : "") + "English", action: function () { setLanguage("en"); } },
       { label: (!en() ? "✓ " : "") + "中文", action: function () { setLanguage("zh"); } },
+      { header: true, label: T("外观") },
+      {
+        label: (S.squareCorners ? "✓ " : "") + T("去掉所有圆角"),
+        action: function () { toggleSquareCorners(x, y); }
+      },
       { header: true, label: T("预设库位置") },
       { label: ((S.presetSide || "top") === "top" ? "✓ " : "") + T("上侧"), action: function () { setPresetSide("top"); } },
       { label: (S.presetSide === "left" ? "✓ " : "") + T("左侧"), action: function () { setPresetSide("left"); } },
@@ -2786,6 +2815,9 @@
     h = measure();
     if (h > H - 16) { itemH = 22; headerH = 18; h = measure(); }
     if (h > H - 16) { itemH = 18; headerH = 16; h = measure(); }
+    // The settings menu gained entries over time; on the smallest dock (200x300) even the 18/16
+    // step can overflow by a few pixels, so take one more step before clamping the origin.
+    if (h > H - 16) { itemH = 16; headerH = 14; h = measure(); }
     var x = clamp(menu.x, 8, Math.max(8, W - w - 8));
     var y = clamp(menu.y, 8, Math.max(8, H - h - 8));
     var rect = { x: x, y: y, w: w, h: h };
