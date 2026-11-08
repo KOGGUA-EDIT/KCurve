@@ -1,5 +1,5 @@
 /*
- * KCurve 2.0.3 — Flow-style easing curve editor for EffectCraft.
+ * KCurve 2.0.4 — Flow-style easing curve editor for EffectCraft.
  *
  * Platform: EffectCraft 0.19.0. Docked adaptive resizing is a 0.19-only feature; older versions
  * (0.13–0.18) are untested and not supported for this release.
@@ -69,7 +69,7 @@
 
 (function (thisObj) {
   // ---------------------------------------------------------------- constants
-  var KCURVE_VERSION = "2.0.3";
+  var KCURVE_VERSION = "2.0.4";
   var SETTINGS_SECTION = "KCurve";
   var SETTINGS_KEY = "state";
   var STATE_VERSION = 6;
@@ -2601,7 +2601,9 @@
       var isSel = S.selectedPreset && S.selectedPreset.groupId === cell.group.id && S.selectedPreset.presetId === pr.id;
       var isHover = hoverId === "preset:" + cell.group.id + ":" + pr.id;
       var sq = Math.min(42, Math.max(26, cell.rect.w - 14));
-      var sx = cell.rect.x + (cell.rect.w - sq) / 2;
+      // The thumbnail and its name share the grid's left edge (the first group chip's first
+      // character column); only the cell's unused right side is left empty on a wide dock.
+      var sx = cell.rect.x;
       var sy = cell.rect.y + 2;
       if (isSel || isHover) {
         if (fullyVisible) fillRound(g, sx, sy, sq, sq, 10, isSel ? P.primaryContainer : P.highest);
