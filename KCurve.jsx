@@ -1,5 +1,5 @@
 /*
- * KCurve 2.0.2 — Flow-style easing curve editor for EffectCraft.
+ * KCurve 2.0.3 — Flow-style easing curve editor for EffectCraft.
  *
  * Platform: EffectCraft 0.19.0. Docked adaptive resizing is a 0.19-only feature; older versions
  * (0.13–0.18) are untested and not supported for this release.
@@ -69,7 +69,7 @@
 
 (function (thisObj) {
   // ---------------------------------------------------------------- constants
-  var KCURVE_VERSION = "2.0.2";
+  var KCURVE_VERSION = "2.0.3";
   var SETTINGS_SECTION = "KCurve";
   var SETTINGS_KEY = "state";
   var STATE_VERSION = 6;
@@ -279,35 +279,44 @@
   // API: newPath() clears the current path and moveTo/lineTo/rectPath/ellipsePath append to it;
   // fillPath(brush[, path]) and strokePath(pen[, path]) paint the current path. Helpers below
   // keep that convention.
-  function roundPath(g, x, y, w, h, r, segOverride) {
+  // Rounded-rect vertices as a polyline. Kept separate from the drawing call because the preset
+  // list crops its cells with the host's missing clip API: the vertices can be clipped by geometry.
+  function roundedRectPoints(x, y, w, h, r, segOverride) {
     r = Math.max(0, Math.min(r, Math.min(w, h) / 2));
     // Every rounded shape is painted as a polyline and the canvas is fully repainted while
     // dragging, so the corner segment count is a direct per-frame cost. At 1x with no
     // anti-aliasing, 4 segments per corner of a 10px radius are within ~0.2px of the true arc;
     // only large radii need a couple more.
-    var i, a, seg = segOverride || Math.max(3, Math.min(6, Math.round(r * 0.4)));
-    g.newPath();
-    g.moveTo(x + r, y);
-    g.lineTo(x + w - r, y);
+    var i, a, pts = [], seg = segOverride || Math.max(3, Math.min(6, Math.round(r * 0.4)));
+    function add(px, py) { pts.push({ x: px, y: py }); }
+    add(x + r, y);
+    add(x + w - r, y);
     for (i = 1; i <= seg; i++) {
       a = -Math.PI / 2 + (Math.PI / 2) * i / seg;
-      g.lineTo(x + w - r + Math.cos(a) * r, y + r + Math.sin(a) * r);
+      add(x + w - r + Math.cos(a) * r, y + r + Math.sin(a) * r);
     }
-    g.lineTo(x + w, y + h - r);
+    add(x + w, y + h - r);
     for (i = 1; i <= seg; i++) {
       a = (Math.PI / 2) * i / seg;
-      g.lineTo(x + w - r + Math.cos(a) * r, y + h - r + Math.sin(a) * r);
+      add(x + w - r + Math.cos(a) * r, y + h - r + Math.sin(a) * r);
     }
-    g.lineTo(x + r, y + h);
+    add(x + r, y + h);
     for (i = 1; i <= seg; i++) {
       a = Math.PI / 2 + (Math.PI / 2) * i / seg;
-      g.lineTo(x + r + Math.cos(a) * r, y + h - r + Math.sin(a) * r);
+      add(x + r + Math.cos(a) * r, y + h - r + Math.sin(a) * r);
     }
-    g.lineTo(x, y + r);
+    add(x, y + r);
     for (i = 1; i <= seg; i++) {
       a = Math.PI + (Math.PI / 2) * i / seg;
-      g.lineTo(x + r + Math.cos(a) * r, y + r + Math.sin(a) * r);
+      add(x + r + Math.cos(a) * r, y + r + Math.sin(a) * r);
     }
+    return pts;
+  }
+  function roundPath(g, x, y, w, h, r, segOverride) {
+    var pts = roundedRectPoints(x, y, w, h, r, segOverride), i;
+    g.newPath();
+    g.moveTo(pts[0].x, pts[0].y);
+    for (i = 1; i < pts.length; i++) g.lineTo(pts[i].x, pts[i].y);
     g.closePath();
   }
   function fillRound(g, x, y, w, h, r, color, segOverride) {
@@ -342,6 +351,93 @@
     g.ellipsePath(x - r, y - r, r * 2, r * 2);
     if (fillColor) g.fillPath(g.newBrush(g.BrushType.SOLID_COLOR, fillColor));
     if (strokeColor) g.strokePath(g.newPen(g.PenType.SOLID_COLOR, strokeColor, strokeW || 1));
+  }
+  // ScriptUI's graphics object has no clipping API, and the panel intentionally paints no
+  // background (the host's own panel colour shows through, which is not one of our palette
+  // colours). Shapes that cross the preset viewport are therefore cut by their geometry.
+  function rectsOverlap(a, b) {
+    return !!a && !!b && a.x < b.x + b.w && a.x + a.w > b.x && a.y < b.y + b.h && a.y + a.h > b.y;
+  }
+  function clipPolygonToRect(pts, c) {
+    function pass(input, inside, cross) {
+      var res = [], i, a, b, ai, bi, n = input.length;
+      for (i = 0; i < n; i++) {
+        a = input[i]; b = input[(i + 1) % n];
+        ai = inside(a); bi = inside(b);
+        if (ai) res.push(a);
+        if (ai !== bi) res.push(cross(a, b));
+      }
+      return res;
+    }
+    var out = pts;
+    out = pass(out, function (p) { return p.x >= c.x; },
+      function (a, b) { var t = (c.x - a.x) / (b.x - a.x); return { x: c.x, y: a.y + (b.y - a.y) * t }; });
+    out = pass(out, function (p) { return p.x <= c.x + c.w; },
+      function (a, b) { var t = (c.x + c.w - a.x) / (b.x - a.x); return { x: c.x + c.w, y: a.y + (b.y - a.y) * t }; });
+    out = pass(out, function (p) { return p.y >= c.y; },
+      function (a, b) { var t = (c.y - a.y) / (b.y - a.y); return { x: a.x + (b.x - a.x) * t, y: c.y }; });
+    out = pass(out, function (p) { return p.y <= c.y + c.h; },
+      function (a, b) { var t = (c.y + c.h - a.y) / (b.y - a.y); return { x: a.x + (b.x - a.x) * t, y: c.y + c.h }; });
+    return out;
+  }
+  function fillRoundClipped(g, x, y, w, h, r, color, clip) {
+    if (w <= 0 || h <= 0) return;
+    var pts = clipPolygonToRect(roundedRectPoints(x, y, w, h, r), clip), i;
+    if (pts.length < 3) return;
+    g.newPath();
+    g.moveTo(pts[0].x, pts[0].y);
+    for (i = 1; i < pts.length; i++) g.lineTo(pts[i].x, pts[i].y);
+    g.closePath();
+    g.fillPath(g.newBrush(g.BrushType.SOLID_COLOR, color));
+  }
+  // Liang-Barsky: the part of one segment inside a rectangle, or null.
+  function clipSegmentToRect(x0, y0, x1, y1, c) {
+    var t0 = 0, t1 = 1, dx = x1 - x0, dy = y1 - y0, i, t;
+    var p = [-dx, dx, -dy, dy];
+    var q = [x0 - c.x, c.x + c.w - x0, y0 - c.y, c.y + c.h - y0];
+    for (i = 0; i < 4; i++) {
+      if (p[i] === 0) {
+        if (q[i] < 0) return null;
+      } else {
+        t = q[i] / p[i];
+        if (p[i] < 0) {
+          if (t > t1) return null;
+          if (t > t0) t0 = t;
+        } else {
+          if (t < t0) return null;
+          if (t < t1) t1 = t;
+        }
+      }
+    }
+    return { x0: x0 + dx * t0, y0: y0 + dy * t0, x1: x0 + dx * t1, y1: y0 + dy * t1 };
+  }
+  // Stroke only the visible runs of a sampled polyline. A run is one path, so a clipped thumbnail
+  // still costs a handful of pen strokes rather than one per sample segment.
+  function strokePolylineClipped(g, pts, pen, clip) {
+    var i, a, b, s, run = null, k;
+    function flush() {
+      if (run && run.length > 1) {
+        g.newPath();
+        g.moveTo(run[0].x, run[0].y);
+        for (k = 1; k < run.length; k++) g.lineTo(run[k].x, run[k].y);
+        g.strokePath(pen);
+      }
+      run = null;
+    }
+    for (i = 0; i + 1 < pts.length; i++) {
+      a = pts[i]; b = pts[i + 1];
+      s = clipSegmentToRect(a.x, a.y, b.x, b.y, clip);
+      if (!s) { flush(); continue; }
+      var startsAtA = Math.abs(s.x0 - a.x) < 1e-6 && Math.abs(s.y0 - a.y) < 1e-6;
+      if (!run || !startsAtA) {
+        flush();
+        run = [{ x: s.x0, y: s.y0 }];
+      }
+      run.push({ x: s.x1, y: s.y1 });
+      var endsAtB = Math.abs(s.x1 - b.x) < 1e-6 && Math.abs(s.y1 - b.y) < 1e-6;
+      if (!endsAtB) flush();
+    }
+    flush();
   }
   // Icon artwork is authored in SVG space: a 576-unit square centred on (288,288). These helpers
   // map such coordinates onto the glyph box (k = pixels per design unit), so the files in svg/ can
@@ -1158,6 +1254,7 @@
       allowOvershoot: false,
       realtime: false,
       writeOnRelease: false,
+      showStatus: true,
       toolsOpen: false,
       toolVisible: {},
       presetSide: "top",
@@ -1204,6 +1301,7 @@
     "设置": "Settings",
     "工具栏": "Toolbar",
     "显示工具栏": "Show tools",
+    "显示状态提示": "Show status hints",
     "预设库位置": "Presets position",
     "上侧": "Top",
     "左侧": "Left",
@@ -1311,6 +1409,7 @@
           if (o.allowOvershoot === true) st.allowOvershoot = true;
           if (o.realtime === true) st.realtime = true;
           if (o.writeOnRelease === true) st.writeOnRelease = true;
+          if (o.showStatus === false) st.showStatus = false;
           if (typeof o.toolsOpen === "boolean") st.toolsOpen = o.toolsOpen;
           if (o.presetSide === "top" || o.presetSide === "left" || o.presetSide === "right") st.presetSide = o.presetSide;
           if (o.onlySelectedHandles === true) st.onlySelectedHandles = true;
@@ -1496,6 +1595,7 @@
         allowOvershoot: !!S.allowOvershoot,
         realtime: !!S.realtime,
         writeOnRelease: !!S.writeOnRelease,
+        showStatus: S.showStatus !== false,
         toolsOpen: S.toolsOpen !== false,
         toolVisible: S.toolVisible || {},
         presetSide: S.presetSide || "top",
@@ -1837,7 +1937,8 @@
   // Opening the fold adds the tool buttons: up to five on the first tool row, the rest (and the
   // write-side modes) on the rows below. Both the count and the row wrapping adapt to the width,
   // so a narrow dock pushes tools down instead of overlapping them; Apply always stretches into
-  // whatever space the row has left.
+  // whatever space the row has left. The 8px gap is deliberate breathing room: with the old 3px
+  // the icons read as one dense strip, so tools that no longer fit now wrap to the second row.
   function toolVisible(id) {
     return !(S.toolVisible && S.toolVisible[id] === false);
   }
@@ -1890,7 +1991,7 @@
   }
 
   function layoutFunction(g, x, y, w) {
-    var gap = 3, rowH = 32, controls = [];
+    var gap = 8, rowH = 34, controls = [];
     function size(c) {
       c.w = c.type === "mode" ? 26 : (c.type === "apply" ? 36 : 28);
       c.h = c.type === "apply" ? 30 : (c.type === "mode" ? 26 : 28);
@@ -1943,11 +2044,14 @@
       }
       bottom = rowY + rowH;
     }
-    var statusY = bottom + 5;
+    // Settings ▸ 显示状态提示 turns the hint line off; the toolbar block then ends after its last
+    // row, giving the space to the preset list instead of leaving an empty status strip.
+    var showStatus = S.showStatus !== false;
+    var statusY = bottom + (showStatus ? 5 : 3);
     return {
-      id: "func", x: x, y: y, w: w, h: statusY + 16 - y,
+      id: "func", x: x, y: y, w: w, h: statusY + (showStatus ? 16 : 0) - y,
       controls: controls, apply: apply, toggle: toggle, star: star,
-      statusY: statusY, statusH: 16
+      statusY: statusY, statusH: showStatus ? 16 : 0
     };
   }
 
@@ -1992,14 +2096,24 @@
     };
     var chipsBottom = chipY + chipH;
     var listY = chipsBottom + 5;
+    // Align the preset grid's leftmost 0 point with the first character of the group chip.
+    // Chips centre their label, so the first glyph starts at (chip width - label width) / 2 inside
+    // the chip (textBox draws it from ch.x+7 with a centred line box). Mirror that offset in the
+    // grid inset instead of the old fixed 4px, and keep the 13px scrollbar reserve on the right.
+    var gridInset = 4;
+    if (chips.length) {
+      var firstChip = chips[0];
+      var firstLabel = ellipsize(g, groupDisplayName(firstChip.group), 10, firstChip.w - 14);
+      gridInset = Math.round(clamp(7 + (firstChip.w - 14 - visualWidth(firstLabel, 10)) / 2, 4, 18));
+    }
     // The list gets whatever the chips left. On a very short dock it can be only a row tall; the
-    // scrollbar (and the cell clip in drawPresets) handles the rest instead of painting past the
-    // panel bottom.
+    // scrollbar (and the cell clipping in drawPresets) handles the rest instead of painting past
+    // the panel bottom.
     var list = { x: rect.x, y: listY, w: rect.w, h: Math.max(32, rect.y + rect.h - listY - 2) };
 
     // Square preset previews, name underneath, wrapping into a grid for the selected group.
     var presets = selected ? selected.presets : [];
-    var gridW = Math.max(40, list.w - 17);
+    var gridW = Math.max(40, list.w - gridInset - 13);
     var cellW = 60, cellGap = 3;
     var cols = Math.max(1, Math.floor(gridW / (cellW + cellGap)));
     cellW = Math.floor(gridW / cols);
@@ -2013,7 +2127,7 @@
     if (presets.length) {
       for (j = 0; j < presets.length; j++) {
         var col = j % cols, row = Math.floor(j / cols);
-        var cx = list.x + 4 + col * cellW;
+        var cx = list.x + gridInset + col * cellW;
         var cy = list.y - scroll + row * (cellH + 6) + 3;
         cells.push({
           group: selected, preset: presets[j],
@@ -2022,7 +2136,7 @@
         });
       }
     }
-    var emptyRect = { x: list.x + 10, y: list.y + 8, w: list.w - 30, h: 28 };
+    var emptyRect = { x: list.x + gridInset, y: list.y + 8, w: list.w - 30, h: 28 };
     var scrollbar = null;
     if (maxScroll > 0) {
       var thumbH = Math.max(26, list.h * list.h / contentH);
@@ -2036,7 +2150,7 @@
     return {
       x: rect.x, y: rect.y, w: rect.w, h: rect.h, headerH: headerH,
       newGroup: newGroup, chips: chips, selectedGroup: selected,
-      list: list, cells: cells, emptyRect: emptyRect,
+      list: list, cells: cells, emptyRect: emptyRect, gridInset: gridInset,
       cols: cols, cellW: cellW, cellH: cellH,
       contentH: contentH, maxScroll: maxScroll, scrollbar: scrollbar
     };
@@ -2150,6 +2264,7 @@
       if (c.type === "apply") drawApply(g, c);
       else drawTool(g, c);
     }
+    if (f.statusH <= 0) return;
     var sel = selectionCount();
     var selText = sel.keys ? TR("已选 " + sel.keys + " 键", sel.keys + " keys selected") : "";
     var rightW = selText ? textWidth(g, selText, 9.5) + 8 : 0;
@@ -2426,7 +2541,7 @@
   }
 
   // ---------------------------------------------------------------- drawing: presets
-  function miniCurve(g, anchors, x, y, w, h, color) {
+  function miniCurve(g, anchors, x, y, w, h, color, clip) {
     var segs = curveSegmentsFor(anchors), si, tt, pt;
     // Fit overshoot values instead of clamping them to 0..1: a back/Ease Out curve with
     // y>1 used to look flat in the preset thumbnail because every y was clamped.
@@ -2443,15 +2558,21 @@
     var vw = Math.max(0.001, maxX - minX), vh = Math.max(0.001, maxY - minY);
     var pen = g.newPen(g.PenType.SOLID_COLOR, color, 1.4);
     for (si = 0; si < segs.length; si++) {
-      g.newPath();
+      var pts = [];
       // 12 samples across a ~30px thumbnail: the old 24 points were invisible in the result.
       for (tt = 0; tt <= 12; tt++) {
         pt = cubicPointAt(segs[si], tt / 12);
-        var px = x + (pt[0] - minX) / vw * w;
-        var py = y + h - (pt[1] - minY) / vh * h;
-        if (tt === 0) g.moveTo(px, py); else g.lineTo(px, py);
+        pts.push({ x: x + (pt[0] - minX) / vw * w, y: y + h - (pt[1] - minY) / vh * h });
       }
-      g.strokePath(pen);
+      if (clip) {
+        strokePolylineClipped(g, pts, pen, clip);
+      } else {
+        g.newPath();
+        for (tt = 0; tt < pts.length; tt++) {
+          if (tt === 0) g.moveTo(pts[tt].x, pts[tt].y); else g.lineTo(pts[tt].x, pts[tt].y);
+        }
+        g.strokePath(pen);
+      }
     }
   }
   function drawNewGroupChip(g, ng) {
@@ -2464,8 +2585,10 @@
     var pl = lay.presetLayout, r = lay.preset, list = pl.list;
     var listBottom = list.y + list.h;
     var i, j;
-    // 1) Draw full cells first; the mask below clips them exactly at the list edges, so 1px
-    // of a preview/name is still painted when it crosses the viewport border.
+    // 1) Draw every cell that touches the viewport, cutting its artwork at the list edges by
+    // geometry (the list has no background mask the host would draw over). A row scrolled halfway
+    // out therefore keeps showing its remaining pixels instead of vanishing.
+    var listClip = { x: list.x, y: list.y, w: list.w, h: list.h };
     if (pl.selectedGroup && !pl.cells.length) {
       textBox(g, TR("这个组还没有预设 · 点右上角 ☆ 保存", "No presets in this group · Click ☆ above to save"),
         pl.emptyRect.x, pl.emptyRect.y, pl.emptyRect.w, pl.emptyRect.h,
@@ -2473,18 +2596,32 @@
     }
     for (i = 0; i < pl.cells.length; i++) {
       var cell = pl.cells[i], pr = cell.preset;
-      // Only fully visible cells: the list is no longer masked with a background (the panel shows
-      // EffectCraft's own colour), so a partially scrolled row would spill outside the viewport.
-      if (cell.rect.y < list.y || cell.rect.y + cell.rect.h > listBottom) continue;
+      if (!rectsOverlap(cell.rect, listClip)) continue;
+      var fullyVisible = cell.rect.y >= list.y && cell.rect.y + cell.rect.h <= listBottom;
       var isSel = S.selectedPreset && S.selectedPreset.groupId === cell.group.id && S.selectedPreset.presetId === pr.id;
       var isHover = hoverId === "preset:" + cell.group.id + ":" + pr.id;
       var sq = Math.min(42, Math.max(26, cell.rect.w - 14));
       var sx = cell.rect.x + (cell.rect.w - sq) / 2;
       var sy = cell.rect.y + 2;
-      if (isSel || isHover) fillRound(g, sx, sy, sq, sq, 10, isSel ? P.primaryContainer : P.highest);
-      miniCurve(g, pr.anchors, sx + 5, sy + 5, sq - 10, sq - 10, isSel ? P.onPrimaryContainer : P.primary);
-      textBox(g, presetDisplayName(pr), cell.rect.x, sy + sq + 2, cell.rect.w, 15, 9,
-        isSel ? P.onPrimaryContainer : P.text, "center", "REGULAR", cell.rect.w);
+      if (isSel || isHover) {
+        if (fullyVisible) fillRound(g, sx, sy, sq, sq, 10, isSel ? P.primaryContainer : P.highest);
+        else fillRoundClipped(g, sx, sy, sq, sq, 10, isSel ? P.primaryContainer : P.highest, listClip);
+      }
+      miniCurve(g, pr.anchors, sx + 5, sy + 5, sq - 10, sq - 10,
+        isSel ? P.onPrimaryContainer : P.primary, fullyVisible ? null : listClip);
+      // drawString cannot be clipped, so the name is drawn only while its line stays inside the
+      // list. One pixel of slack is allowed: it lands in the preset area's own padding, and it
+      // keeps the last row's name visible at common scroll offsets (one row half out of view).
+      var labelY = sy + sq + 2;
+      if (labelY >= list.y - 1 && labelY + 15 <= listBottom + 1) {
+        var labelText = presetDisplayName(pr), labelSize = 9;
+        // Names are left-aligned so they share the grid's first-character column. A name that
+        // would fill its whole cell gets 0.5px smaller, otherwise it visually merges with the
+        // next column's name on a narrow dock (e.g. Material 3's "强调 Emphasized").
+        if (visualWidth(labelText, labelSize) > cell.rect.w) labelSize = 8.5;
+        textBox(g, labelText, cell.rect.x, labelY, cell.rect.w, 15, labelSize,
+          isSel ? P.onPrimaryContainer : P.text, "left", "REGULAR", cell.rect.w);
+      }
     }
     // 2) Group chips, width follows the label, then the "+" that adds a group.
     for (i = 0; i < pl.chips.length; i++) {
@@ -2612,6 +2749,15 @@
       { header: true, label: T("工具栏") },
       { label: (S.toolsOpen !== false ? "✓ " : "") + T("显示工具栏"), action: toggleTools },
       { label: T("工具显示…"), action: function () { openToolVisibilityMenu(x, y); } },
+      {
+        label: (S.showStatus !== false ? "✓ " : "") + T("显示状态提示"),
+        action: function () {
+          S.showStatus = S.showStatus === false;
+          saveState();
+          menu = null;
+          redraw(true);
+        }
+      },
       { header: true, label: T("实时写入模式") },
       {
         label: (S.writeOnRelease ? "✓ " : "") + T("停止拖动后写入"),
