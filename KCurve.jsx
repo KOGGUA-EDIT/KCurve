@@ -1,5 +1,5 @@
 /*
- * KCurve 2.0.5 — Flow-style easing curve editor for EffectCraft.
+ * KCurve 2.0.6 — Flow-style easing curve editor for EffectCraft.
  *
  * Platform: EffectCraft 0.19.0. Docked adaptive resizing is a 0.19-only feature; older versions
  * (0.13–0.18) are untested and not supported for this release.
@@ -64,6 +64,8 @@
  * a dark/light palette read from EffectCraft's appearance.theme and large, expressive radii.
  * Settings ▸ 外观 ▸ 去掉所有圆角 squares every radius at once (state.squareCorners): the drawing
  * helpers share one roundedRectPoints() vertex source, so the whole UI turns to right angles.
+ * In the stacked (presets on top) layout a 1px #2F2D30 hairline separates the toolbar from the
+ * preset group; side preset layouts have no horizontal seam to draw.
  *
  * License: MIT. The easing math follows EffectCraft's official Ease Presets extension
  * (MIT OR Apache-2.0) by the EffectCraft contributors.
@@ -71,7 +73,7 @@
 
 (function (thisObj) {
   // ---------------------------------------------------------------- constants
-  var KCURVE_VERSION = "2.0.5";
+  var KCURVE_VERSION = "2.0.6";
   var SETTINGS_SECTION = "KCurve";
   var SETTINGS_KEY = "state";
   var STATE_VERSION = 6;
@@ -3905,6 +3907,11 @@
     drawEditor(g, L);
     drawFunction(g, L);
     drawPresets(g, L);
+    // Stacked layout only: a 1px hairline sits in the 6px gap between the toolbar and the preset
+    // group, so the two regions read as separate bands instead of one continuous surface.
+    if (L.side === "top") {
+      fillRound(g, L.preset.x, L.preset.y - 3, L.preset.w, 1, 0, C("#2F2D30"));
+    }
     drawResize(g);
     drawDraggedPreset(g);
     drawMenu(g);
