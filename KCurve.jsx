@@ -1,5 +1,5 @@
 /*
- * KCurve 2.0.8 — Flow-style easing curve editor for EffectCraft.
+ * KCurve 2.0.9 — Flow-style easing curve editor for EffectCraft.
  *
  * Platform: EffectCraft 0.19.0. Docked adaptive resizing is a 0.19-only feature; older versions
  * (0.13–0.18) are untested and not supported for this release.
@@ -25,7 +25,8 @@
  * bottom-left and top-right corners with no gap. A lever collapsed onto an endpoint (a linear
  * keyframe imports that way) draws no dot there either, so the corner stays bare. A multi-point
  * curve keeps the earlier look — a 12px inset and the endpoint rings — because there the ends are
- * real keyframes and their rings need to sit inside the card.
+ * real keyframes and their rings need to sit inside the card. With overshoot allowed the 0–1 unit
+ * box is drawn as a light 4×4 grid: as a bare 1px outline it disappeared into the dark card.
  *
  * Import strategy: two selected keys -> read the out side of the pair and the in side of its
  * second key, average multiple pairs, and fill the single-segment editor. Three or more selected
@@ -81,7 +82,7 @@
 
 (function (thisObj) {
   // ---------------------------------------------------------------- constants
-  var KCURVE_VERSION = "2.0.8";
+  var KCURVE_VERSION = "2.0.9";
   var SETTINGS_SECTION = "KCurve";
   var SETTINGS_KEY = "state";
   var STATE_VERSION = 6;
@@ -2238,8 +2239,21 @@
     function my(v) { return plot.y + plot.h - (v - view.y0) / (view.y1 - view.y0) * plot.h; }
 
     if (S.allowOvershoot) {
-      var sx0 = mx(0), sy0 = my(1), sx1 = mx(1), sy1 = my(0);
-      strokeRect(g, sx0, sy0, Math.max(1, sx1 - sx0), Math.max(1, sy1 - sy0), withAlpha(P.outline, 0.35), 1);
+      // The unit box marks where time runs 0→1. With overshoot on it floats inside a wider view, and a
+      // bare 1px outline in the card's own frame colour was almost invisible on the dark card, so it
+      // gets a light 4×4 grid plus a brighter edge: the grid is what makes the box readable, and the
+      // overshoot can then be measured against it.
+      var ux0 = mx(0), uy0 = my(1), ux1 = mx(1), uy1 = my(0), step;
+      var gridPen = withAlpha(P.text, 0.13);
+      for (step = 1; step < 4; step++) {
+        // Snap to half pixels: a 1px line on a whole coordinate blurs across two rows.
+        var gridX = Math.round(mx(step / 4)) + 0.5, gridY = Math.round(my(step / 4)) + 0.5;
+        line(g, gridX, uy0, gridX, uy1, gridPen, 1);
+        line(g, ux0, gridY, ux1, gridY, gridPen, 1);
+      }
+      strokeRect(g, Math.round(ux0) + 0.5, Math.round(uy0) + 0.5,
+        Math.max(1, Math.round(ux1) - Math.round(ux0)), Math.max(1, Math.round(uy1) - Math.round(uy0)),
+        withAlpha(P.text, 0.36), 1);
     }
 
     var segs = curveSegmentsFor(S.anchors);
