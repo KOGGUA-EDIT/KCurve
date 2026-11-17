@@ -1,5 +1,5 @@
 /*
- * KCurve 2.0.7 — Flow-style easing curve editor for EffectCraft.
+ * KCurve 2.0.8 — Flow-style easing curve editor for EffectCraft.
  *
  * Platform: EffectCraft 0.19.0. Docked adaptive resizing is a 0.19-only feature; older versions
  * (0.13–0.18) are untested and not supported for this release.
@@ -19,11 +19,13 @@
  *    Applying multi-point mode removes the selected keys and rebuilds one key per point at the
  *    proportional time, then maps each segment's levers to KeyframeEase values.
  *
- * Editor plot: the graph is drawn corner to corner. The first/last anchors are pinned to
- * (0,0)/(1,1) and rendered as bare line ends (no dot, no selection ring), and the plot is inset
- * only to the frame's centreline, so the curve meets the card's blue border at its bottom-left and
- * top-right corners with no gap. A lever collapsed onto an endpoint (a linear keyframe imports that
- * way) draws no dot there either, so the corner stays bare.
+ * Editor plot: on a single-segment curve the graph is drawn corner to corner. The first/last anchors
+ * are pinned to (0,0)/(1,1) and rendered as bare line ends (no dot, no selection ring), and the plot
+ * is inset only to the frame's centreline, so the curve meets the card's blue border at its
+ * bottom-left and top-right corners with no gap. A lever collapsed onto an endpoint (a linear
+ * keyframe imports that way) draws no dot there either, so the corner stays bare. A multi-point
+ * curve keeps the earlier look — a 12px inset and the endpoint rings — because there the ends are
+ * real keyframes and their rings need to sit inside the card.
  *
  * Import strategy: two selected keys -> read the out side of the pair and the in side of its
  * second key, average multiple pairs, and fill the single-segment editor. Three or more selected
@@ -79,7 +81,7 @@
 
 (function (thisObj) {
   // ---------------------------------------------------------------- constants
-  var KCURVE_VERSION = "2.0.7";
+  var KCURVE_VERSION = "2.0.8";
   var SETTINGS_SECTION = "KCurve";
   var SETTINGS_KEY = "state";
   var STATE_VERSION = 6;
@@ -2224,11 +2226,12 @@
     fillRound(g, r.x, r.y, r.w, r.h, cardR, P.bg);
     strokeRound(g, r.x + 0.75, r.y + 0.75, Math.max(1, r.w - 1.5), Math.max(1, r.h - 1.5),
       Math.max(2, cardR - 0.75), withAlpha(P.primary, 0.8), 1.5);
-    // The first/last anchors are pinned to (0,0)/(1,1) and are drawn as bare line ends, so the plot
-    // runs the full card and the curve stops on the frame instead of a ring width inside it. A
-    // rounded corner's frame centreline passes (1 - 1/√2) * r inside the box; landing the endpoint
-    // on that point makes the line meet the blue border exactly at the corner.
-    var inset = squareCorners() ? 0.75 : cardR - (cardR - 0.75) * 0.7071067811865476;
+    // The first/last anchors are pinned to (0,0)/(1,1). On a single-segment curve they are drawn as
+    // bare line ends, so the plot runs the full card and the curve stops on the frame instead of a
+    // ring width inside it; a rounded corner's frame centreline passes (1 - 1/√2) * r inside the
+    // box, and landing the endpoint on that point makes the line meet the blue border exactly at the
+    // corner. Multi-point curves keep the old inset so their endpoint rings stay inside the card.
+    var inset = multi ? 12 : (squareCorners() ? 0.75 : cardR - (cardR - 0.75) * 0.7071067811865476);
     var plot = { x: r.x + inset, y: r.y + inset, w: Math.max(1, r.w - 2 * inset), h: Math.max(1, r.h - 2 * inset) };
     var view = viewBounds();
     function mx(v) { return plot.x + (v - view.x0) / (view.x1 - view.x0) * plot.w; }
@@ -2267,9 +2270,9 @@
     for (ai = 0; ai < S.anchors.length; ai++) {
       a = S.anchors[ai];
       var ax = mx(a.x), ay = my(a.y), isSel = ai === selected;
-      // The two ends of the curve draw no dot at all: they are pinned to (0,0)/(1,1) and the plot
-      // now reaches the frame, so a point marker there would only hide the corner the line meets.
-      if (ai !== 0 && ai !== S.anchors.length - 1) {
+      // On a single-segment curve the two ends draw no dot at all: they are pinned to (0,0)/(1,1)
+      // and the plot reaches the frame, so a marker there would only hide the corner the line meets.
+      if (multi || (ai !== 0 && ai !== S.anchors.length - 1)) {
         if (isSel) circle(g, ax, ay, 9, null, withAlpha(P.primary, 0.45), 6);
         circle(g, ax, ay, isSel ? 6 : 4.6, isSel ? P.primary : P.text, null, 0);
       }
@@ -2282,7 +2285,7 @@
       // A lever collapsed onto an endpoint (a linear keyframe imports that way) would put a dot back
       // on the corner the curve now meets the frame at, so leave that corner bare. The handle stays
       // draggable: a collapsed lever hits exactly like the point and the handle wins the tie.
-      if ((hd.i === 0 || hd.i === S.anchors.length - 1) &&
+      if (!multi && (hd.i === 0 || hd.i === S.anchors.length - 1) &&
         Math.abs(hd.x - mx(S.anchors[hd.i].x)) < 1.2 && Math.abs(hd.y - my(S.anchors[hd.i].y)) < 1.2) continue;
       circle(g, hd.x, hd.y, 4.8, P.text, P.bg, 1.5);
     }
