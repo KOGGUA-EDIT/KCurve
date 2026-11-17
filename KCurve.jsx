@@ -1,5 +1,5 @@
 /*
- * KCurve 2.0.6 — Flow-style easing curve editor for EffectCraft.
+ * KCurve 2.0.7 — Flow-style easing curve editor for EffectCraft.
  *
  * Platform: EffectCraft 0.19.0. Docked adaptive resizing is a 0.19-only feature; older versions
  * (0.13–0.18) are untested and not supported for this release.
@@ -18,6 +18,12 @@
  *    clean. A middle point is "smooth" by default; 平滑/折断 toggles that constraint.
  *    Applying multi-point mode removes the selected keys and rebuilds one key per point at the
  *    proportional time, then maps each segment's levers to KeyframeEase values.
+ *
+ * Editor plot: the graph is drawn corner to corner. The first/last anchors are pinned to
+ * (0,0)/(1,1) and rendered as bare line ends (no dot, no selection ring), and the plot is inset
+ * only to the frame's centreline, so the curve meets the card's blue border at its bottom-left and
+ * top-right corners with no gap. A lever collapsed onto an endpoint (a linear keyframe imports that
+ * way) draws no dot there either, so the corner stays bare.
  *
  * Import strategy: two selected keys -> read the out side of the pair and the in side of its
  * second key, average multiple pairs, and fill the single-segment editor. Three or more selected
@@ -73,7 +79,7 @@
 
 (function (thisObj) {
   // ---------------------------------------------------------------- constants
-  var KCURVE_VERSION = "2.0.6";
+  var KCURVE_VERSION = "2.0.7";
   var SETTINGS_SECTION = "KCurve";
   var SETTINGS_KEY = "state";
   var STATE_VERSION = 6;
@@ -2218,9 +2224,11 @@
     fillRound(g, r.x, r.y, r.w, r.h, cardR, P.bg);
     strokeRound(g, r.x + 0.75, r.y + 0.75, Math.max(1, r.w - 1.5), Math.max(1, r.h - 1.5),
       Math.max(2, cardR - 0.75), withAlpha(P.primary, 0.8), 1.5);
-    // The first/last anchors are pinned to (0,0)/(1,1), so keep their selected rings inside the
-    // card: inset the plot by the ring's outer radius instead of starting one pixel from the edge.
-    var inset = 12;
+    // The first/last anchors are pinned to (0,0)/(1,1) and are drawn as bare line ends, so the plot
+    // runs the full card and the curve stops on the frame instead of a ring width inside it. A
+    // rounded corner's frame centreline passes (1 - 1/√2) * r inside the box; landing the endpoint
+    // on that point makes the line meet the blue border exactly at the corner.
+    var inset = squareCorners() ? 0.75 : cardR - (cardR - 0.75) * 0.7071067811865476;
     var plot = { x: r.x + inset, y: r.y + inset, w: Math.max(1, r.w - 2 * inset), h: Math.max(1, r.h - 2 * inset) };
     var view = viewBounds();
     function mx(v) { return plot.x + (v - view.x0) / (view.x1 - view.x0) * plot.w; }
@@ -2259,14 +2267,24 @@
     for (ai = 0; ai < S.anchors.length; ai++) {
       a = S.anchors[ai];
       var ax = mx(a.x), ay = my(a.y), isSel = ai === selected;
-      if (isSel) circle(g, ax, ay, 9, null, withAlpha(P.primary, 0.45), 6);
-      circle(g, ax, ay, isSel ? 6 : 4.6, isSel ? P.primary : P.text, null, 0);
+      // The two ends of the curve draw no dot at all: they are pinned to (0,0)/(1,1) and the plot
+      // now reaches the frame, so a point marker there would only hide the corner the line meets.
+      if (ai !== 0 && ai !== S.anchors.length - 1) {
+        if (isSel) circle(g, ax, ay, 9, null, withAlpha(P.primary, 0.45), 6);
+        circle(g, ax, ay, isSel ? 6 : 4.6, isSel ? P.primary : P.text, null, 0);
+      }
       anchorsHit.push({ kind: "anchor", i: ai, x: ax, y: ay, r: 12 });
     }
     // Redraw handle dots above the selected point's ring; an edge-clamped lever can otherwise
     // disappear under the anchor circle even though it is still draggable.
     for (ai = 0; ai < handlesHit.length; ai++) {
-      circle(g, handlesHit[ai].x, handlesHit[ai].y, 4.8, P.text, P.bg, 1.5);
+      var hd = handlesHit[ai];
+      // A lever collapsed onto an endpoint (a linear keyframe imports that way) would put a dot back
+      // on the corner the curve now meets the frame at, so leave that corner bare. The handle stays
+      // draggable: a collapsed lever hits exactly like the point and the handle wins the tie.
+      if ((hd.i === 0 || hd.i === S.anchors.length - 1) &&
+        Math.abs(hd.x - mx(S.anchors[hd.i].x)) < 1.2 && Math.abs(hd.y - my(S.anchors[hd.i].y)) < 1.2) continue;
+      circle(g, hd.x, hd.y, 4.8, P.text, P.bg, 1.5);
     }
     lay.plot = { x: plot.x, y: plot.y, w: plot.w, h: plot.h, view: view, mx: mx, my: my };
     lay.handles = handlesHit;
