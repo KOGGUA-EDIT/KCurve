@@ -1,5 +1,5 @@
 /*
- * KCurve 2.0.9 — Flow-style easing curve editor for EffectCraft.
+ * KCurve 2.0.10 — Flow-style easing curve editor for EffectCraft.
  *
  * Platform: EffectCraft 0.19.0. Docked adaptive resizing is a 0.19-only feature; older versions
  * (0.13–0.18) are untested and not supported for this release.
@@ -76,13 +76,19 @@
  * In the stacked (presets on top) layout a 1px #2F2D30 hairline separates the toolbar from the
  * preset group; side preset layouts have no horizontal seam to draw.
  *
+ * Toolbar icons: the glyphs are transcriptions of the vector artwork in svg/ui2.0/ — 反转 for the
+ * reverse button, 复制 for import, and a chain link (连接-闭合 / 连接-打开) for the overshoot toggle,
+ * closed while the curve is held to 0–1 and broken once it may leave the box. The artwork's own
+ * strokes are 2–4% of the icon box, which is under a pixel at button size, so the shapes are
+ * stroked with the shared icon pen and their gaps keep the artwork's proportion to that pen.
+ *
  * License: MIT. The easing math follows EffectCraft's official Ease Presets extension
  * (MIT OR Apache-2.0) by the EffectCraft contributors.
  */
 
 (function (thisObj) {
   // ---------------------------------------------------------------- constants
-  var KCURVE_VERSION = "2.0.9";
+  var KCURVE_VERSION = "2.0.10";
   var SETTINGS_SECTION = "KCurve";
   var SETTINGS_KEY = "state";
   var STATE_VERSION = 6;
@@ -481,6 +487,15 @@
         mt * mt * mt * p0[0] + 3 * mt * mt * t * p1[0] + 3 * mt * t * t * p2[0] + t * t * t * p3[0],
         mt * mt * mt * p0[1] + 3 * mt * mt * t * p1[1] + 3 * mt * t * t * p2[1] + t * t * t * p3[1]
       ]);
+    }
+    return out;
+  }
+  // Points along a circular arc in icon space (degrees, clockwise on screen), for iconSvgPath.
+  function iconArcPoints(cax, cay, rad, a0, a1, steps) {
+    var out = [], i, a;
+    for (i = 0; i <= steps; i++) {
+      a = (a0 + (a1 - a0) * i / steps) * Math.PI / 180;
+      out.push([cax + Math.cos(a) * rad, cay + Math.sin(a) * rad]);
     }
     return out;
   }
@@ -2494,59 +2509,73 @@
       return;
     }
     if (kind === "overshoot") {
-      // Boundary OFF = chain intact; boundary ON (allow overshoot) = chain broken.
+      // svg/ui2.0/连接-闭合.svg and 连接-打开.svg: one chain link — closed while the curve is held
+      // to 0–1, broken into two open halves once it may overshoot. Both files draw a 164-unit tall
+      // link and the open one is only wider, so both are mapped with the closed link's scale: the
+      // link keeps its size and only the gap appears. The artwork's own 5-unit stroke would be a
+      // third of a pixel at button size, so the outline takes the shared icon pen.
+      var linkK = r / 128, linkTop = 220.51, linkMid = 288, linkBot = 355.49, linkR = 67.49;
+      var linkPts;
       if (!state.on) {
-        strokeRound(g, cx - 10, cy - 4, 13, 8, 4, color, 1.6);
-        strokeRound(g, cx - 3, cy - 4, 13, 8, 4, color, 1.6);
-        line(g, cx - 5, cy, cx + 5, cy, color, 1.6);
+        linkPts = [[227.48, linkTop]]
+          .concat(iconArcPoints(348.51, linkMid, linkR, -90, 90, 18))
+          .concat([[227.48, linkBot]])
+          .concat(iconArcPoints(227.48, linkMid, linkR, 90, 270, 18));
+        g.newPath();
+        iconSvgPath(g, cx, cy, linkK, linkPts, true);
+        g.strokePath(pen);
       } else {
-        // A clearly broken chain: two smaller links with a visible gap between them.
-        strokeRound(g, cx - 16, cy - 4, 11, 8, 4, color, 1.7);
-        strokeRound(g, cx + 5, cy - 4, 11, 8, 4, color, 1.7);
-        line(g, cx - 3, cy - 6, cx - 3, cy - 2, color, 1.7);
-        line(g, cx + 3, cy + 2, cx + 3, cy + 6, color, 1.7);
+        // Left half: bottom edge, round the left cap, top edge. Right half mirrors it.
+        linkPts = [[263.16, linkBot], [202.06, linkBot]]
+          .concat(iconArcPoints(202.06, linkMid, linkR, 90, 270, 18))
+          .concat([[263.16, linkTop]]);
+        g.newPath();
+        iconSvgPath(g, cx, cy, linkK, linkPts, false);
+        g.strokePath(pen);
+        linkPts = [[314.01, linkTop], [373.94, linkTop]]
+          .concat(iconArcPoints(373.94, linkMid, linkR, -90, 90, 18))
+          .concat([[314.01, linkBot]]);
+        g.newPath();
+        iconSvgPath(g, cx, cy, linkK, linkPts, false);
+        g.strokePath(pen);
       }
       return;
     }
     if (kind === "reverse") {
-      // Two L-shaped arrows, diagonally mirrored: down-then-right and up-then-left, with a small
-      // rounded bend on each 90° corner.
+      // svg/ui2.0/反转.svg: two L-brackets mirrored across the diagonal — one runs along the bottom
+      // edge and up the left one, the other along the top edge and down the right one, each stopping
+      // short of its far corner so the pair reads as two brackets, not a closed square. The artwork's
+      // own stroke is 3.8% of the icon (under a pixel at button size), so the bracket weight is the
+      // icon pen's and the gap keeps the artwork's proportion to that weight instead (~2.4 strokes).
+      var revQ = r * 0.94, revGap = 3.9;
       g.newPath();
-      g.moveTo(cx - 8, cy - 8);
-      g.lineTo(cx - 8, cy + 4);
-      g.lineTo(cx - 6.5, cy + 6.5);
-      g.lineTo(cx - 4, cy + 8);
-      g.lineTo(cx + 1.5, cy + 8);
+      g.moveTo(cx + revQ, cy + revQ);
+      g.lineTo(cx - revQ, cy + revQ);
+      g.lineTo(cx - revQ, cy - revQ + revGap);
       g.strokePath(pen);
-      line(g, cx + 1.5, cy + 8, cx - 2, cy + 5.5, color, 1.6);
-      line(g, cx + 1.5, cy + 8, cx - 2, cy + 10.5, color, 1.6);
       g.newPath();
-      g.moveTo(cx + 8, cy + 8);
-      g.lineTo(cx + 8, cy - 4);
-      g.lineTo(cx + 6.5, cy - 6.5);
-      g.lineTo(cx + 4, cy - 8);
-      g.lineTo(cx - 1.5, cy - 8);
+      g.moveTo(cx - revQ, cy - revQ);
+      g.lineTo(cx + revQ, cy - revQ);
+      g.lineTo(cx + revQ, cy + revQ - revGap);
       g.strokePath(pen);
-      line(g, cx - 1.5, cy - 8, cx + 2, cy - 5.5, color, 1.6);
-      line(g, cx - 1.5, cy - 8, cx + 2, cy - 10.5, color, 1.6);
       return;
     }
     if (kind === "import") {
-      // The reference artwork (svg/复制.svg): a back sheet peeking out along the left and bottom, and
-      // a front document whose top-right corner is cut off. The artwork hides the rest of the back
-      // sheet under the front sheet's white fill; a stroked icon cannot fill, so only the visible run
-      // of the back sheet is drawn - it starts and ends exactly where that fill would have covered it
-      // (on the front sheet's left edge and on its bottom edge). div 128 keeps the drawn sheets at
-      // about the same footprint as the other toolbar glyphs.
+      // svg/ui2.0/复制.svg: two equal sheets, the front one offset up and to the right. The artwork
+      // fills both sheets, so the front one hides most of the back one; a stroked icon cannot fill,
+      // and drawing both outlines in full would cross them inside the overlap. Only the run of the
+      // back sheet the front sheet does not cover is stroked - a sliver of its top edge, its left
+      // edge, its bottom edge and a sliver of its right edge - which starts and ends on the front
+      // sheet's edges. div 128 keeps the pair at the same footprint as the other toolbar glyphs.
       var copyK = r / 128;
       g.newPath();
       iconSvgPath(g, cx, cy, copyK,
-        [[220.07, 206.188], [188.669, 206.188], [188.669, 406.607], [363.017, 406.607], [363.017, 372.73]],
+        [[206.48, 203.71], [160.0, 203.71], [160.0, 413.25], [369.52, 413.25], [369.52, 372.29]],
         false);
       g.strokePath(pen);
       g.newPath();
       iconSvgPath(g, cx, cy, copyK,
-        [[340.471, 169.393], [219.904, 169.927], [220.805, 373.358], [387.331, 372.621], [386.606, 208.903]],
+        [[206.48, 162.77], [416.0, 162.77], [416.0, 372.29], [206.48, 372.29]],
         true);
       g.strokePath(pen);
       return;
